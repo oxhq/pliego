@@ -29,6 +29,7 @@ use js::glue::{
     RunScriptEnvironmentPreparerClosure, SetBuildId, StreamConsumerConsumeChunk,
     StreamConsumerNoteResponseURLs, StreamConsumerStreamEnd, StreamConsumerStreamError,
 };
+use js::jsapi::JS::{RTPCallerTypeToken, SetReduceMicrosecondTimePrecisionCallback};
 use js::jsapi::{
     AsmJSOption, BuildIdCharVector, CompilationType, Dispatchable_MaybeShuttingDown, GCDescription,
     GCOptions, GCProgress, GCReason, GetPromiseUserInputEventHandlingState, Handle as RawHandle,
@@ -67,6 +68,7 @@ use script_bindings::settings_stack::run_a_script;
 use servo_config::opts::{self, DiagnosticsLoggingOption};
 use servo_config::pref;
 use style::thread_state::{self, ThreadState};
+use timers::DocumentClock;
 
 use crate::dom::bindings::codegen::Bindings::PromiseBinding::PromiseJobCallback;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::Response_Binding::ResponseMethods;
@@ -94,8 +96,11 @@ use crate::dom::promise::Promise;
 use crate::dom::promiserejectionevent::PromiseRejectionEvent;
 use crate::dom::response::Response;
 use crate::dom::trustedtypes::trustedscript::TrustedScript;
+use crate::dom::window::Window;
 use crate::messaging::{CommonScriptMsg, ScriptEventLoopSender};
-use crate::microtask::{EnqueuedPromiseCallback, Microtask, MicrotaskQueue};
+use crate::microtask::{
+    EnqueuedPromiseCallback, Microtask, MicrotaskExecutionLedgerSlot, MicrotaskQueue,
+};
 use crate::realms::enter_auto_realm;
 use crate::script_module::EnsureModuleHooksInitialized;
 use crate::task_source::TaskSourceName;
@@ -139,6 +144,52 @@ static SECURITY_CALLBACKS: JSSecurityCallbacks = JSSecurityCallbacks {
     codeForEvalGets: Some(code_for_eval_gets),
     subsumes: Some(principals::subsumes),
 };
+
+fn window_date_time_microseconds(host_time: f64, clock: &DocumentClock) -> f64 {
+    if !clock.is_controlled() {
+        return host_time;
+    }
+    clock
+        .javascript_date_time_microseconds()
+        .unwrap_or(f64::NAN)
+}
+
+/// SpiderMonkey obtains JavaScript Date wall time before invoking this process-wide hook. Only a
+/// controlled Window realm replaces that value; independent realtime realms preserve it exactly.
+#[expect(unsafe_code)]
+unsafe extern "C" fn reduce_microsecond_time_precision(
+    host_time: f64,
+    _caller_type: RTPCallerTypeToken,
+    cx: *mut RawJSContext,
+) -> f64 {
+    // An unclassifiable realm must not leak host time into a controlled Window. The callback only
+    // restores `host_time` after it has positively identified an existing realtime/non-Window
+    // realm, or computes controlled wall time from that Window's document clock.
+    let mut reduced_time = f64::NAN;
+    wrap_panic(&mut || {
+        let Some(cx) = NonNull::new(cx) else {
+            return;
+        };
+        // SAFETY: SpiderMonkey calls this hook with its currently-entered JSContext.
+        let mut cx = unsafe { JSContext::from_ptr(cx) };
+        let mut realm = CurrentRealm::assert(&mut cx);
+        let global_object = realm.global().get();
+        // SAFETY: the current realm roots a valid, non-null global object.
+        if unsafe { get_dom_class(global_object) }.is_err() {
+            return;
+        }
+        let global = GlobalScope::from_current_realm(&mut realm);
+        let Some(window) = global.downcast::<Window>() else {
+            // Controlled worker/worklet event loops are separately blocked. Their existing
+            // realtime realms must retain SpiderMonkey's host wall time.
+            reduced_time = host_time;
+            return;
+        };
+        reduced_time =
+            window_date_time_microseconds(host_time, &window.as_global_scope().document_clock());
+    });
+    reduced_time
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, JSTraceable, MallocSizeOf, PartialEq)]
 pub(crate) enum ScriptThreadEventCategory {
@@ -346,7 +397,7 @@ unsafe extern "C" fn run_jobs(microtask_queue: *const c_void, cx: *mut RawJSCont
         let microtask_queue = unsafe { &*(microtask_queue as *const MicrotaskQueue) };
         // TODO: run Promise- and User-variant Microtasks, and do #notify-about-rejected-promises.
         // Those will require real `target_provider` and `globalscopes` values.
-        microtask_queue.checkpoint(&mut cx, |_| None, vec![]);
+        let _ = microtask_queue.checkpoint(&mut cx, |_| None, vec![]);
     });
 }
 
@@ -360,15 +411,24 @@ unsafe extern "C" fn empty(extra: *const c_void) -> bool {
     result
 }
 
+struct InterruptQueueState {
+    /// Live nested queues in SpiderMonkey's interruption stack order.
+    queues: Vec<Rc<MicrotaskQueue>>,
+    /// Exact slot shared by the main queue, every live nested queue, and future pushes.
+    execution_ledger: MicrotaskExecutionLedgerSlot,
+}
+
 #[expect(unsafe_code)]
 unsafe extern "C" fn push_new_interrupt_queue(interrupt_queues: *mut c_void) -> *const c_void {
     let mut result = std::ptr::null();
     wrap_panic(&mut || {
         let mut interrupt_queues =
-            unsafe { Box::from_raw(interrupt_queues as *mut Vec<Rc<MicrotaskQueue>>) };
-        let new_queue = Rc::new(MicrotaskQueue::default());
+            unsafe { Box::from_raw(interrupt_queues as *mut InterruptQueueState) };
+        let new_queue = Rc::new(MicrotaskQueue::with_execution_ledger_slot(
+            interrupt_queues.execution_ledger.clone(),
+        ));
         result = Rc::as_ptr(&new_queue) as *const c_void;
-        interrupt_queues.push(new_queue);
+        interrupt_queues.queues.push(new_queue);
         std::mem::forget(interrupt_queues);
     });
     result
@@ -379,9 +439,12 @@ unsafe extern "C" fn pop_interrupt_queue(interrupt_queues: *mut c_void) -> *cons
     let mut result = std::ptr::null();
     wrap_panic(&mut || {
         let mut interrupt_queues =
-            unsafe { Box::from_raw(interrupt_queues as *mut Vec<Rc<MicrotaskQueue>>) };
-        let popped_queue: Rc<MicrotaskQueue> =
-            interrupt_queues.pop().expect("Guaranteed by SpiderMonkey?");
+            unsafe { Box::from_raw(interrupt_queues as *mut InterruptQueueState) };
+        let popped_queue: Rc<MicrotaskQueue> = interrupt_queues
+            .queues
+            .pop()
+            .expect("Guaranteed by SpiderMonkey?");
+        // Any queue SpiderMonkey restores beneath this pop was built from the same policy slot.
         // Dangling, but jsglue.cpp will only use this for pointer comparison.
         result = Rc::as_ptr(&popped_queue) as *const c_void;
         std::mem::forget(interrupt_queues);
@@ -393,7 +456,7 @@ unsafe extern "C" fn pop_interrupt_queue(interrupt_queues: *mut c_void) -> *cons
 unsafe extern "C" fn drop_interrupt_queues(interrupt_queues: *mut c_void) {
     wrap_panic(&mut || {
         let interrupt_queues =
-            unsafe { Box::from_raw(interrupt_queues as *mut Vec<Rc<MicrotaskQueue>>) };
+            unsafe { Box::from_raw(interrupt_queues as *mut InterruptQueueState) };
         drop(interrupt_queues);
     });
 }
@@ -910,7 +973,10 @@ impl Runtime {
         // Extra queues for debugger scripts (“interrupts”) via AutoDebuggerJobQueueInterruption and saveJobQueue().
         // Moved indefinitely to mozjs via CreateJobQueue(), borrowed from mozjs via JobQueueTraps, and moved back from
         // mozjs for dropping via DeleteJobQueue().
-        let interrupt_queues: Box<Vec<Rc<MicrotaskQueue>>> = Box::default();
+        let interrupt_queues = Box::new(InterruptQueueState {
+            queues: Vec::new(),
+            execution_ledger: microtask_queue.execution_ledger_slot(),
+        });
 
         let cx_opts;
         let job_queue;
@@ -1118,15 +1184,24 @@ impl DerefMut for Runtime {
 pub struct JSEngineSetup(JSEngine);
 
 impl Default for JSEngineSetup {
+    #[expect(unsafe_code)]
     fn default() -> Self {
         let engine = JSEngine::init().unwrap();
+        // Every Servo-created realm receives the required caller token in create_global_object.
+        unsafe {
+            SetReduceMicrosecondTimePrecisionCallback(Some(reduce_microsecond_time_precision));
+        }
         *JS_ENGINE.lock().unwrap() = Some(engine.handle());
         Self(engine)
     }
 }
 
 impl Drop for JSEngineSetup {
+    #[expect(unsafe_code)]
     fn drop(&mut self) {
+        unsafe {
+            SetReduceMicrosecondTimePrecisionCallback(None);
+        }
         *JS_ENGINE.lock().unwrap() = None;
 
         while !self.0.can_shutdown() {
@@ -1576,4 +1651,109 @@ impl IntroductionType {
     /// <https://firefox-source-docs.mozilla.org/devtools-user/debugger-api/debugger.source/index.html>
     pub const WORKER: &CStr = c"Worker";
     pub const WORKER_STR: &str = "Worker";
+}
+
+#[cfg(test)]
+mod tests {
+    use timers::{DocumentClockConfiguration, DocumentTime, DocumentUnixTime};
+
+    use super::*;
+
+    #[test]
+    fn controlled_window_date_uses_checked_clock_wall_time_in_exact_order() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 2_000,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(5_000),
+            execution_limits: None,
+        });
+
+        assert_eq!(window_date_time_microseconds(99.0, &clock), 7.0);
+        clock.advance_to(DocumentTime::from_nanos(3_000)).unwrap();
+        assert_eq!(window_date_time_microseconds(1.0, &clock), 8.0);
+        assert_eq!(window_date_time_microseconds(2.0, &clock), 8.0);
+    }
+
+    #[test]
+    fn controlled_window_date_supports_negative_fractional_unix_time() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(-1),
+            execution_limits: None,
+        });
+
+        assert_eq!(window_date_time_microseconds(123.0, &clock), -0.001);
+    }
+
+    #[test]
+    fn controlled_window_date_returns_nan_after_a_sticky_wall_overflow() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(i128::MAX),
+            execution_limits: None,
+        });
+
+        assert!(window_date_time_microseconds(123.0, &clock).is_nan());
+        assert_eq!(clock.terminal_error(), None);
+        assert_eq!(
+            clock.advance_to(DocumentTime::from_nanos(1)),
+            Err(timers::DocumentClockError::Overflow)
+        );
+        assert_eq!(
+            clock.terminal_error(),
+            Some(timers::DocumentClockError::Overflow)
+        );
+        assert!(window_date_time_microseconds(456.0, &clock).is_nan());
+        assert_eq!(clock.try_now(), Ok(DocumentTime::ZERO));
+    }
+
+    #[test]
+    fn controlled_window_date_returns_spec_nan_outside_time_clip_without_rounding_to_boundary() {
+        const API2_MAX_EPOCH_NS: i128 = 8_640_000_000_000_000_000_000;
+        const API2_MAX_SPAN_NS: u128 = 9_007_199_254_740_991_000_000;
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: API2_MAX_SPAN_NS,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(API2_MAX_EPOCH_NS),
+            execution_limits: None,
+        });
+
+        let observed = window_date_time_microseconds(-123.0, &clock);
+        assert_eq!(
+            clock.unix_time_ns(),
+            Ok(DocumentUnixTime::from_nanos(
+                API2_MAX_EPOCH_NS + API2_MAX_SPAN_NS as i128
+            ))
+        );
+        assert!(observed.is_nan());
+        assert_eq!(clock.terminal_error(), None);
+    }
+
+    #[test]
+    fn controlled_window_date_fails_closed_on_unreachable_in_range_millisecond() {
+        const ADVERSARIAL_EPOCH_MS: i128 = 8_639_999_999_999_979;
+
+        for epoch_ms in [ADVERSARIAL_EPOCH_MS, -ADVERSARIAL_EPOCH_MS] {
+            let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+                initial_time_ns: 0,
+                unix_time_origin_ns: DocumentUnixTime::from_nanos(epoch_ms * 1_000_000),
+                execution_limits: None,
+            });
+
+            assert!(window_date_time_microseconds(789.0, &clock).is_nan());
+            assert!(matches!(
+                clock.terminal_error(),
+                Some(timers::DocumentClockError::JavaScriptDatePrecisionLoss {
+                    expected_milliseconds,
+                    ..
+                }) if expected_milliseconds == epoch_ms
+            ));
+            assert_eq!(clock.try_now(), Ok(DocumentTime::ZERO));
+        }
+    }
+
+    #[test]
+    fn realtime_window_date_preserves_spidermonkey_host_time_exactly() {
+        let clock = DocumentClock::default();
+        let host_time = 1_725_555_123_456_789.0;
+        assert_eq!(window_date_time_microseconds(host_time, &clock), host_time);
+    }
 }

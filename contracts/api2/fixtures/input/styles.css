@@ -1,0 +1,19 @@
+@font-face {
+  font-family: "Pliego Contract Fixture";
+  src: url("assets/fixture-font.bin") format("opentype");
+}
+
+html,
+body {
+  margin: 0;
+}
+
+body {
+  color: #000;
+  font-family: "Pliego Contract Fixture";
+}
+
+img {
+  height: 64px;
+  width: 64px;
+}

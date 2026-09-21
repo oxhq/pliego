@@ -41,9 +41,7 @@ def positive(value: object) -> bool:
 
 def positive_rects(fragments: list[object], kind: str) -> list[object]:
     rects = [
-        fragment.get("rect")
-        for fragment in fragments
-        if isinstance(fragment, dict) and fragment.get("kind") == kind
+        fragment.get("rect") for fragment in fragments if isinstance(fragment, dict) and fragment.get("kind") == kind
     ]
     return [
         rect
@@ -102,14 +100,56 @@ def main() -> int:
                     timeout=60,
                     check=False,
                 )
-                overlap_lines = [line.strip() for line in overlap.stdout.splitlines() if line.strip()]
-                require(overlap.returncode != 0 and bool(overlap_lines), "overlapping output was accepted")
-                overlap_summary = json.loads(overlap_lines[-1])
+                require(overlap.returncode == 1, f"overlapping output exited {overlap.returncode}")
                 require(
-                    overlap_summary.get("error", {}).get("code") == "OUTPUT_ARTIFACTS_OVERLAP",
+                    overlap.stdout.endswith("\n") and "\r" not in overlap.stdout and overlap.stdout.count("\n") == 1,
+                    f"overlapping output stdout framing drifted: {overlap.stdout!r}",
+                )
+                overlap_summary = json.loads(
+                    overlap.stdout,
+                    parse_constant=lambda value: fail(f"overlapping output contains {value}"),
+                )
+                require(isinstance(overlap_summary, dict), "overlapping output terminal is not an object")
+                require(
+                    overlap.stdout == json.dumps(overlap_summary, ensure_ascii=False, separators=(",", ":")) + "\n",
+                    "overlapping output terminal is not canonical JSON",
+                )
+                require(
+                    set(overlap_summary) == {"artifacts", "document_pdf", "engine", "error", "render_id", "status"},
                     repr(overlap_summary),
                 )
+                require(
+                    overlap_summary.get("status") == "failed"
+                    and overlap_summary.get("engine") == "pliego"
+                    and overlap_summary.get("artifacts") == str(overlap_artifacts)
+                    and overlap_summary.get("document_pdf") == str(overlap_output)
+                    and overlap_summary.get("error")
+                    == {
+                        "code": "OUTPUT_ARTIFACTS_OVERLAP",
+                        "message": "requested output must be outside the artifact directory",
+                    },
+                    repr(overlap_summary),
+                )
+                overlap_render_id = overlap_summary.get("render_id")
+                require(
+                    isinstance(overlap_render_id, str)
+                    and overlap_render_id.startswith("sha256:")
+                    and len(overlap_render_id) == 71
+                    and all(character in "0123456789abcdef" for character in overlap_render_id[7:]),
+                    f"overlapping output render ID drifted: {overlap_render_id!r}",
+                )
+                require(
+                    overlap.stderr
+                    == "pliego: OUTPUT_ARTIFACTS_OVERLAP: requested output must be outside the artifact directory\n",
+                    f"overlapping output stderr drifted: {overlap.stderr!r}",
+                )
+                require(not overlap_artifacts.exists(), "overlapping output created public artifacts")
                 require(not overlap_output.exists(), "overlapping output path was populated")
+                require(
+                    not list(Path(temp_dir).glob(".pliego-runtime-*")),
+                    "overlapping output retained a private runtime container",
+                )
+                require(not list(Path(temp_dir).iterdir()), "overlapping output mutated its publication parent")
 
                 rejected_artifacts = Path(temp_dir) / "rejected-artifacts"
                 rejected_output = Path(temp_dir) / "rejected.pdf"
@@ -135,28 +175,13 @@ def main() -> int:
                 rejected_summary = json.loads(rejected_lines[-1])
                 require(
                     rejected_summary.get("status") == "failed"
-                    and rejected_summary.get("error", {}).get("code")
-                    == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
+                    and rejected_summary.get("error", {}).get("code") == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
                     repr(rejected_summary),
                 )
                 require(not rejected_output.exists(), "partial scene PDF was published")
-                rejected_environment = json.loads(
-                    (rejected_artifacts / "environment.json").read_text(encoding="utf-8")
-                )
                 require(
-                    rejected_environment.get("document_pdf", {}).get("status") == "failed"
-                    and rejected_environment.get("document_pdf", {}).get("error", {}).get("code")
-                    == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
-                    repr(rejected_environment.get("document_pdf")),
-                )
-                rejected_report = json.loads(
-                    (rejected_artifacts / "scene-report.json").read_text(encoding="utf-8")
-                )
-                require(
-                    rejected_report.get("document_pdf", {}).get("status") == "failed"
-                    and rejected_report.get("document_pdf", {}).get("error", {}).get("code")
-                    == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
-                    repr(rejected_report.get("document_pdf")),
+                    not rejected_artifacts.exists(),
+                    "partial scene published unvalidated failure artifacts",
                 )
             command = [str(binary)]
             if mode == "effects":
@@ -252,9 +277,7 @@ def main() -> int:
                 if isinstance(fragment, dict) and fragment.get("kind") == "image"
             }
             clipped_ids = {
-                event.get("fragment_id")
-                for event in paint_events
-                if event.get("kind") == "content-geometry"
+                event.get("fragment_id") for event in paint_events if event.get("kind") == "content-geometry"
             }
             require(
                 bool(image_ids & clipped_ids),
@@ -400,9 +423,8 @@ def main() -> int:
             link = links[0]
             require(isinstance(link, dict), "captured link is not an object")
             expected_target = (
-                (root / fixture.parent / "final" / "report.html").resolve().as_uri()
-                + "?edition=1#summary"
-            )
+                root / fixture.parent / "final" / "report.html"
+            ).resolve().as_uri() + "?edition=1#summary"
             require(
                 link.get("url") == expected_target,
                 f"expected resolved link URL {expected_target!r}; got {link.get('url')!r}",
@@ -465,9 +487,7 @@ def main() -> int:
             require(resource_log.is_file(), f"resource log does not exist: {resource_log}")
             try:
                 resources = [
-                    json.loads(line)
-                    for line in resource_log.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
+                    json.loads(line) for line in resource_log.read_text(encoding="utf-8").splitlines() if line.strip()
                 ]
             except (OSError, json.JSONDecodeError) as error:
                 fail(f"could not load resource log {resource_log}: {error}")
@@ -495,8 +515,7 @@ def main() -> int:
             )
             content_type = image_resource.get("content_type")
             require(
-                isinstance(content_type, str)
-                and content_type.partition(";")[0].strip().lower() == "image/svg+xml",
+                isinstance(content_type, str) and content_type.partition(";")[0].strip().lower() == "image/svg+xml",
                 f"captured image content type is not image/svg+xml: {content_type!r}",
             )
             artifact = image_resource.get("artifact")

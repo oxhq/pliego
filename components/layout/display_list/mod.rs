@@ -13,7 +13,7 @@ use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Ve
 use gradient::WebRenderGradient;
 use layout_api::{
     LayoutDebugColor, LayoutDebugPaintEvent, LayoutDebugPaintRect, LayoutDebugPaintRectKind,
-    LayoutDebugRect, LayoutDebugTableBorder, ReflowStatistics,
+    LayoutDebugRect, LayoutDebugRectAppUnits, LayoutDebugTableBorder, ReflowStatistics,
 };
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
@@ -2873,6 +2873,7 @@ fn debug_paint_rect(
             y: rect.min.y,
             width: rect.width(),
             height: rect.height(),
+            app_units: None,
         },
         color: LayoutDebugColor {
             r: color.r.clamp(0.0, 1.0),
@@ -3217,6 +3218,12 @@ fn append_solid_table_border(
             y: rect.origin.y.to_f32_px(),
             width: rect.size.width.to_f32_px(),
             height: rect.size.height.to_f32_px(),
+            app_units: Some(LayoutDebugRectAppUnits {
+                x: rect.origin.x.0,
+                y: rect.origin.y.0,
+                width: rect.size.width.0,
+                height: rect.size.height.0,
+            }),
         },
         color: LayoutDebugColor {
             r: color.r,

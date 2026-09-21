@@ -1,37 +1,1533 @@
 #!/usr/bin/env python3
 
-"""Focused Linux proof for the process-tree sampler."""
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+"""Fixture, live cgroup-v2, observer, and PHP bridge checks."""
 
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
+import errno
+import hashlib
 import io
 import json
 import os
 import random
-import signal
-import statistics
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import process_tree_sampler
+from benchmark_runtime import BROWSERSHOT_TARGET, GENERIC_TARGET, runtime_target
+import validate_result
 
 SAMPLER = Path(__file__).with_name("process_tree_sampler.py")
+PHP_RUNNER = Path(__file__).resolve().parents[1] / "runners" / "pliego.php"
+DIRTY_CACHE_FILENAME = "fixture-linked-unsynced-cache"
+
+
+def write_proc_stat(proc: Path, pid: int, start_ticks: int) -> None:
+    directory = proc / str(pid)
+    directory.mkdir(parents=True)
+    fields = [
+        "S",
+        "1",
+        str(pid),
+        str(pid),
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "1",
+        "1",
+        "0",
+        "0",
+        "20",
+        "0",
+        "1",
+        "0",
+        str(start_ticks),
+        "4096",
+        "1",
+    ]
+    (directory / "stat").write_text(f"{pid} (fixture) {' '.join(fields)}\n", encoding="ascii")
+
+
+def delegated_fixture(directory: Path) -> tuple[Path, Path, Path]:
+    root = directory / "cgroup"
+    parent = root / "delegated"
+    harness = parent / "harness"
+    proc = directory / "proc"
+    harness.mkdir(parents=True)
+    (proc / "self").mkdir(parents=True)
+    (root / "cgroup.controllers").write_text("cpu io memory pids\n", encoding="ascii")
+    (parent / "cgroup.type").write_text("domain\n", encoding="ascii")
+    (parent / "cgroup.controllers").write_text("cpu io memory pids\n", encoding="ascii")
+    (parent / "cgroup.subtree_control").write_text("cpu io memory pids\n", encoding="ascii")
+    (parent / "cgroup.procs").write_text("", encoding="ascii")
+    (parent / "cgroup.threads").write_text("", encoding="ascii")
+    (harness / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+    (harness / "cgroup.threads").write_text(f"{os.getpid()}\n", encoding="ascii")
+    (harness / "cgroup.type").write_text("domain\n", encoding="ascii")
+    (proc / "self" / "cgroup").write_text("0::/delegated/harness\n", encoding="ascii")
+    return root, parent, proc
+
+
+def delegated_namespace_root_fixture(directory: Path) -> tuple[Path, Path]:
+    root = directory / "root"
+    harness = root / "harness"
+    proc = directory / "proc"
+    harness.mkdir(parents=True)
+    (proc / "self").mkdir(parents=True)
+    (root / "cgroup.controllers").write_text("cpu io memory pids\n", encoding="ascii")
+    (root / "cgroup.subtree_control").write_text("cpu io memory pids\n", encoding="ascii")
+    (root / "cgroup.procs").write_text("", encoding="ascii")
+    (root / "cgroup.threads").write_text("", encoding="ascii")
+    (harness / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+    (harness / "cgroup.threads").write_text(f"{os.getpid()}\n", encoding="ascii")
+    (harness / "cgroup.type").write_text("domain\n", encoding="ascii")
+    (proc / "self" / "cgroup").write_text("0::/harness\n", encoding="ascii")
+    return root, proc
+
+
+def require_fixture_parent(parent: Path, root: Path, proc: Path) -> process_tree_sampler.BoundDirectory:
+    return process_tree_sampler.require_delegated_parent(parent, root, proc, os.getuid(), os.getgid())
+
+
+def counter_fixture(cgroup: Path) -> None:
+    cgroup.mkdir(parents=True, exist_ok=True)
+    (cgroup / "cpu.stat").write_text("usage_usec 0\nuser_usec 0\nsystem_usec 0\n", encoding="ascii")
+    (cgroup / "io.stat").write_text("8:0 rbytes=0 wbytes=0 rios=0 wios=0\n", encoding="ascii")
+    (cgroup / "memory.current").write_text("0\n", encoding="ascii")
+    (cgroup / "memory.peak").write_text("0\n", encoding="ascii")
+    (cgroup / "memory.reclaim").write_text("", encoding="ascii")
+    (cgroup / "memory.stat").write_text("file_dirty 0\nfile_writeback 0\n", encoding="ascii")
+    (cgroup / "pids.peak").write_text("0\n", encoding="ascii")
+    (cgroup / "cgroup.events").write_text("populated 0\nfrozen 0\n", encoding="ascii")
+
+
+def must_be_incomplete(code: str, operation: object) -> None:
+    try:
+        operation()  # type: ignore[operator]
+    except process_tree_sampler.MeasurementIncomplete as error:
+        assert error.code == code, error
+    else:
+        raise AssertionError(f"expected measurement-incomplete[{code}]")
+
+
+def captured_incomplete(code: str, operation: object) -> process_tree_sampler.MeasurementIncomplete:
+    try:
+        operation()  # type: ignore[operator]
+    except process_tree_sampler.MeasurementIncomplete as error:
+        assert error.code == code, error
+        return error
+    raise AssertionError(f"expected measurement-incomplete[{code}]")
+
+
+def fixture_proofs() -> None:
+    if sys.platform == "linux":
+        assert process_tree_sampler.SYNC_WRITE_FLAG == os.O_SYNC
+        assert process_tree_sampler.ENGINE_OUTPUT_OPEN_FLAGS & process_tree_sampler.SYNC_WRITE_FLAG
+        assert process_tree_sampler.ENGINE_OUTPUT_OPEN_FLAGS & os.O_NOFOLLOW
+        assert process_tree_sampler.ENGINE_OUTPUT_OPEN_FLAGS & os.O_CREAT == 0
+    empty_io = process_tree_sampler.parse_io_stat("8:0 \n", "hosted-zero-io")
+    assert empty_io == {"8:0": {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}}
+    must_be_incomplete(
+        "CGROUP_COUNTER_MISSING",
+        lambda: process_tree_sampler.parse_io_stat("8:0 rbytes=1\n", "partial-io"),
+    )
+    must_be_incomplete(
+        "CGROUP_COUNTER_INVALID",
+        lambda: process_tree_sampler.parse_io_stat("not-a-device \n", "invalid-device"),
+    )
+    parser = argparse.ArgumentParser(prog="process_tree_sampler")
+    error = io.StringIO()
+    with contextlib.redirect_stderr(error):
+        try:
+            process_tree_sampler.require_linux(parser, "win32")
+        except SystemExit as exit_error:
+            assert exit_error.code == 2
+        else:
+            raise AssertionError("unsupported platform was accepted")
+    assert "cgroup-v2 accounting requires Linux" in error.getvalue()
+
+    must_be_incomplete("BROKER_ROOT_REQUIRED", lambda: process_tree_sampler.require_broker_root(1000, 1000))
+    must_be_incomplete(
+        "ENGINE_ACCOUNT_UNAVAILABLE",
+        lambda: process_tree_sampler.resolve_engine_account(lambda _name: (_ for _ in ()).throw(KeyError())),
+    )
+    must_be_incomplete(
+        "ENGINE_ACCOUNT_UNSAFE",
+        lambda: process_tree_sampler.resolve_engine_account(
+            lambda name: SimpleNamespace(pw_name=name, pw_uid=0, pw_gid=0, pw_dir="/root")
+        ),
+    )
+    must_be_incomplete(
+        "ENGINE_ACCOUNT_UNSAFE",
+        lambda: process_tree_sampler.resolve_engine_account(
+            lambda name: SimpleNamespace(pw_name=name, pw_uid=1234, pw_gid=1234, pw_dir="/nonexistent")
+        ),
+    )
+    fixture_account = process_tree_sampler.resolve_engine_account(
+        lambda name: SimpleNamespace(
+            pw_name=name,
+            pw_uid=1234,
+            pw_gid=1234,
+            pw_dir=process_tree_sampler.ENGINE_ACCOUNT_HOME,
+        )
+    )
+    assert fixture_account.name == process_tree_sampler.ENGINE_ACCOUNT
+    writable_home = SimpleNamespace(st_mode=0o040700, st_dev=1, st_ino=2)
+    with (
+        mock.patch.object(process_tree_sampler.os, "stat", return_value=writable_home),
+        mock.patch.object(process_tree_sampler, "engine_account_can_write", return_value=True),
+    ):
+        must_be_incomplete(
+            "ENGINE_ACCOUNT_UNSAFE",
+            lambda: process_tree_sampler.validate_engine_account_home(fixture_account),
+        )
+    with mock.patch.dict(
+        os.environ,
+        {
+            "BROWSERSHOT_CHROME_PATH": "/opt/chrome",
+            "BROWSERSHOT_NODE_BINARY": "/usr/bin/node",
+            "GITHUB_TOKEN": "must-not-leak",
+            "LANG": "C",
+        },
+        clear=True,
+    ):
+        child_environment = process_tree_sampler.engine_environment(fixture_account, "/engine-owned-artifacts")
+    assert "GITHUB_TOKEN" not in child_environment and child_environment["LANG"] == "C"
+    assert child_environment["BROWSERSHOT_CHROME_PATH"] == "/opt/chrome"
+    assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
+    assert child_environment["TMPDIR"] == "/engine-owned-artifacts"
+    assert process_tree_sampler.BROWSER_SHARED_MEMORY_ENV not in child_environment
+    assert child_environment["HOME"] == process_tree_sampler.ENGINE_ACCOUNT_HOME
+    assert not (set(process_tree_sampler.RUNTIME_DIRECTORY_NAMES) - {"HOME"}).intersection(child_environment)
+    private_runtime = {
+        variable: f"/engine-owned-artifacts/{name}"
+        for variable, name in process_tree_sampler.RUNTIME_DIRECTORY_NAMES.items()
+    }
+    private_environment = process_tree_sampler.engine_environment(
+        fixture_account, "/engine-owned-artifacts", private_runtime
+    )
+    assert {variable: private_environment[variable] for variable in private_runtime} == private_runtime
+    browser_environment = process_tree_sampler.engine_environment(
+        fixture_account,
+        "/engine-owned-artifacts",
+        private_runtime,
+        "/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp",
+    )
+    assert browser_environment["TMPDIR"] == "/engine-owned-artifacts"
+    assert (
+        browser_environment[process_tree_sampler.BROWSER_SHARED_MEMORY_ENV]
+        == "/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp"
+    )
+    process_tree_sampler.require_browser_shared_memory_entry_names(
+        iter([process_tree_sampler.BROWSER_SHARED_MEMORY_DIRECTORY]),
+        {process_tree_sampler.BROWSER_SHARED_MEMORY_DIRECTORY},
+        "fixture-container",
+    )
+    bounded_visits = 0
+
+    def attacker_sized_inventory() -> Iterator[str]:
+        nonlocal bounded_visits
+        for index in range(1_000_000):
+            bounded_visits += 1
+            yield f"state-{index}"
+
+    must_be_incomplete(
+        "BROWSER_SHARED_MEMORY_NOT_EMPTY",
+        lambda: process_tree_sampler.require_browser_shared_memory_entry_names(
+            attacker_sized_inventory(),
+            set(),
+            "fixture-directory",
+        ),
+    )
+    assert bounded_visits == 1
+    blocked_binding = SimpleNamespace(close=mock.Mock())
+    blocked_cleanup = process_tree_sampler.incomplete(
+        "CGROUP_CLEANUP_FAILED",
+        "fixture cgroup did not drain",
+    )
+    long_original = process_tree_sampler.incomplete(
+        "FIXTURE_ORIGINAL_FAILURE",
+        "x" * 4096,
+    )
+    with (
+        mock.patch.object(
+            process_tree_sampler,
+            "force_cleanup_browser_shared_memory",
+            side_effect=AssertionError("browser purge must not run before cgroup drain"),
+        ),
+        mock.patch.object(
+            process_tree_sampler,
+            "browser_shared_memory_residue_diagnostic",
+            return_value={"status": "fixture-residue"},
+        ),
+    ):
+        blocked_failure = captured_incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+            lambda: process_tree_sampler.cleanup_failed_browser_shared_memory(
+                blocked_binding,
+                long_original,
+                blocked_cleanup,
+            ),
+        )
+    blocked_diagnostic = json.loads(str(blocked_failure).split("diagnostic=", 1)[1])
+    assert blocked_diagnostic["cleanup"]["code"] == "CGROUP_CLEANUP_FAILED"
+    assert blocked_diagnostic["original_failure"]["code"] == "FIXTURE_ORIGINAL_FAILURE"
+    assert len(blocked_diagnostic["original_failure"]["message"]) == 2048
+    assert blocked_diagnostic["original_failure"]["message"].endswith("...")
+    blocked_binding.close.assert_called_once_with()
+
+    fake_cgroup = SimpleNamespace()
+    fake_parent = SimpleNamespace()
+    with (
+        mock.patch.object(process_tree_sampler, "KILL_GRACE_MS", 0.0),
+        mock.patch.object(process_tree_sampler, "write_bound"),
+        mock.patch.object(process_tree_sampler, "cgroup_flat", return_value={"populated": 1}),
+        mock.patch.object(process_tree_sampler, "remove_bound_leaf") as remove_unproven_cgroup,
+    ):
+        cgroup_failure = captured_incomplete(
+            "CGROUP_CLEANUP_FAILED",
+            lambda: process_tree_sampler.force_cleanup(fake_cgroup, fake_parent, None),
+        )
+    remove_unproven_cgroup.assert_not_called()
+    with (
+        mock.patch.object(process_tree_sampler, "KILL_GRACE_MS", 0.0),
+        mock.patch.object(process_tree_sampler, "write_bound"),
+        mock.patch.object(process_tree_sampler, "cgroup_flat", return_value={"populated": 0}),
+        mock.patch.object(process_tree_sampler.os, "waitpid", return_value=(0, 0)) as bounded_waitpid,
+        mock.patch.object(process_tree_sampler.os, "kill"),
+        mock.patch.object(process_tree_sampler, "remove_bound_leaf") as remove_unreaped_cgroup,
+    ):
+        unreaped_failure = captured_incomplete(
+            "CGROUP_CLEANUP_FAILED",
+            lambda: process_tree_sampler.force_cleanup(fake_cgroup, fake_parent, 4242),
+        )
+    assert all(call.args == (4242, os.WNOHANG) for call in bounded_waitpid.call_args_list)
+    remove_unreaped_cgroup.assert_not_called()
+    unreaped_diagnostic = json.loads(str(unreaped_failure).split("diagnostic=", 1)[1])
+    assert unreaped_diagnostic["populated"] == 0
+    assert unreaped_diagnostic["root_reaped"] is False
+    delayed_pid = 4243
+    with (
+        mock.patch.object(process_tree_sampler, "write_bound"),
+        mock.patch.object(process_tree_sampler, "cgroup_flat", return_value={"populated": 0}),
+        mock.patch.object(
+            process_tree_sampler.os,
+            "waitpid",
+            side_effect=[(0, 0), (delayed_pid, 9)],
+        ) as delayed_waitpid,
+        mock.patch.object(process_tree_sampler.os, "kill") as delayed_kill,
+        mock.patch.object(process_tree_sampler, "remove_bound_leaf") as remove_reaped_cgroup,
+    ):
+        process_tree_sampler.force_cleanup(fake_cgroup, fake_parent, delayed_pid)
+    assert [call.args for call in delayed_waitpid.call_args_list] == [
+        (delayed_pid, os.WNOHANG),
+        (delayed_pid, os.WNOHANG),
+    ]
+    delayed_kill.assert_called_once_with(delayed_pid, process_tree_sampler.signal.SIGKILL)
+    remove_reaped_cgroup.assert_called_once_with(fake_cgroup, fake_parent)
+    combined_failure = process_tree_sampler.combined_cgroup_cleanup_failure(
+        [("measurement", cgroup_failure)],
+        long_original,
+    )
+    assert combined_failure is not None
+    combined_diagnostic = json.loads(str(combined_failure).split("diagnostic=", 1)[1])
+    assert combined_diagnostic["cleanup"][0]["cgroup"] == "measurement"
+    assert combined_diagnostic["cleanup"][0]["failure"]["code"] == "CGROUP_CLEANUP_FAILED"
+    assert combined_diagnostic["original_failure"]["code"] == "FIXTURE_ORIGINAL_FAILURE"
+    assert len(combined_diagnostic["original_failure"]["message"]) == 2048
+
+    for browser_resource in (None, object()):
+        finalizer_parent = SimpleNamespace(close=mock.Mock())
+        finalizer_child = SimpleNamespace(close=mock.Mock())
+        with (
+            mock.patch.object(
+                process_tree_sampler,
+                "force_cleanup",
+                side_effect=OSError(errno.EIO, "fixture cgroup teardown failure"),
+            ),
+            mock.patch.object(
+                process_tree_sampler,
+                "cleanup_failed_browser_shared_memory",
+            ) as browser_finalizer,
+        ):
+            finalizer_failure = captured_incomplete(
+                "CGROUP_CLEANUP_FAILED",
+                lambda: process_tree_sampler.cleanup_failed_sample_resources(
+                    finalizer_parent,
+                    finalizer_child,
+                    None,
+                    browser_resource,
+                    None,
+                    False,
+                    False,
+                    long_original,
+                ),
+            )
+        finalizer_child.close.assert_called_once_with()
+        finalizer_parent.close.assert_called_once_with()
+        finalizer_diagnostic = json.loads(str(finalizer_failure).split("diagnostic=", 1)[1])
+        assert finalizer_diagnostic["original_failure"]["code"] == "FIXTURE_ORIGINAL_FAILURE"
+        if browser_resource is None:
+            browser_finalizer.assert_not_called()
+        else:
+            browser_finalizer.assert_called_once()
+            browser_arguments = browser_finalizer.call_args.args
+            assert browser_arguments[0] is browser_resource
+            assert browser_arguments[1] is long_original
+            assert browser_arguments[2].code == "CGROUP_CLEANUP_FAILED"
+
+    finalization_order: list[str] = []
+
+    def failing_close(phase: str) -> None:
+        finalization_order.append(phase)
+        raise OSError(errno.EIO, f"fixture {phase} failure")
+
+    measurement_resource = SimpleNamespace(
+        label="measurement",
+        close=lambda: failing_close("measurement.close"),
+    )
+    staging_resource = SimpleNamespace(
+        label="staging",
+        close=lambda: failing_close("staging.close"),
+    )
+    parent_resource = SimpleNamespace(close=lambda: failing_close("parent.close"))
+    browser_resource = object()
+
+    def ordered_cgroup_cleanup(resource: SimpleNamespace, _parent: object, _pid: int | None) -> None:
+        finalization_order.append(f"{resource.label}.cleanup")
+        if resource is measurement_resource:
+            raise process_tree_sampler.incomplete(
+                "CGROUP_CLEANUP_FAILED",
+                "fixture measurement cleanup failure",
+            )
+
+    def ordered_browser_cleanup(
+        resource: object,
+        original: BaseException | None,
+        blocker: BaseException | None,
+    ) -> None:
+        finalization_order.append("browser")
+        assert resource is browser_resource
+        assert original is long_original
+        assert isinstance(blocker, process_tree_sampler.MeasurementIncomplete)
+        assert blocker.code == "CGROUP_CLEANUP_FAILED"
+        raise process_tree_sampler.incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+            "fixture browser cleanup blocked by cgroup failure",
+        )
+
+    with (
+        mock.patch.object(process_tree_sampler, "force_cleanup", side_effect=ordered_cgroup_cleanup),
+        mock.patch.object(
+            process_tree_sampler,
+            "cleanup_failed_browser_shared_memory",
+            side_effect=ordered_browser_cleanup,
+        ),
+    ):
+        aggregate_finalization = captured_incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+            lambda: process_tree_sampler.cleanup_failed_sample_resources(
+                parent_resource,
+                measurement_resource,
+                staging_resource,
+                browser_resource,
+                None,
+                False,
+                False,
+                long_original,
+            ),
+        )
+    assert finalization_order == [
+        "measurement.cleanup",
+        "measurement.close",
+        "staging.cleanup",
+        "staging.close",
+        "browser",
+        "parent.close",
+    ]
+    aggregate_diagnostic = json.loads(str(aggregate_finalization).split("diagnostic=", 1)[1])
+    assert aggregate_diagnostic["original_failure"]["code"] == "FIXTURE_ORIGINAL_FAILURE"
+    assert [entry["phase"] for entry in aggregate_diagnostic["teardown"]] == [
+        "measurement.cleanup",
+        "measurement.close",
+        "staging.close",
+        "browser",
+        "parent.close",
+    ]
+    assert [entry["failure"]["type"] for entry in aggregate_diagnostic["teardown"]] == [
+        "MeasurementIncomplete",
+        "OSError",
+        "OSError",
+        "MeasurementIncomplete",
+        "OSError",
+    ]
+
+    if sys.platform == "linux":
+        assert process_tree_sampler.shutil.rmtree.avoids_symlink_attacks
+        with tempfile.TemporaryDirectory() as raw:
+            diagnostic_root = Path(raw)
+            for index in range(70):
+                (diagnostic_root / f"{index:03d}-{'x' * 180}").write_bytes(b"fixture")
+            diagnostic_fd = os.open(diagnostic_root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                inventory = process_tree_sampler.browser_shared_memory_fd_diagnostic(diagnostic_fd)
+            finally:
+                os.close(diagnostic_fd)
+        assert inventory["entries_examined"] == 64
+        assert len(inventory["entries"]) == 8
+        assert inventory["scan_truncated"] is True
+        assert all(len(entry["name"]) <= 120 for entry in inventory["entries"])
+
+        with tempfile.TemporaryDirectory() as raw:
+            provisioning_root = Path(raw).resolve()
+            provisioning_root.chmod(0o1777)
+            with mock.patch.object(
+                process_tree_sampler.os,
+                "fchown",
+                side_effect=OSError(errno.EIO, "fixture fchown failure"),
+            ):
+                captured_incomplete(
+                    "BROWSER_SHARED_MEMORY_UNAVAILABLE",
+                    lambda: process_tree_sampler.create_browser_shared_memory(
+                        fixture_account,
+                        root=provisioning_root,
+                        broker_uid=os.getuid(),
+                        broker_gid=os.getgid(),
+                        filesystem_type=lambda _path: "tmpfs",
+                    ),
+                )
+            assert list(provisioning_root.iterdir()) == []
+
+        with tempfile.TemporaryDirectory() as raw:
+            provisioning_root = Path(raw).resolve()
+            provisioning_root.chmod(0o1777)
+            with (
+                mock.patch.object(
+                    process_tree_sampler.os,
+                    "fchown",
+                    side_effect=OSError(errno.EIO, "fixture fchown failure"),
+                ),
+                mock.patch.object(
+                    process_tree_sampler,
+                    "remove_bound_browser_shared_memory_tree",
+                    side_effect=OSError(errno.EIO, "fixture cleanup failure"),
+                ),
+            ):
+                provisioning_failure = captured_incomplete(
+                    "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+                    lambda: process_tree_sampler.create_browser_shared_memory(
+                        fixture_account,
+                        root=provisioning_root,
+                        broker_uid=os.getuid(),
+                        broker_gid=os.getgid(),
+                        filesystem_type=lambda _path: "tmpfs",
+                    ),
+                )
+            provisioning_diagnostic = json.loads(str(provisioning_failure).split("diagnostic=", 1)[1])
+            assert provisioning_diagnostic["cleanup"]["type"] == "OSError"
+            assert provisioning_diagnostic["original_failure"]["code"] == "BROWSER_SHARED_MEMORY_UNAVAILABLE"
+            residue = list(provisioning_root.glob(f"{process_tree_sampler.BROWSER_SHARED_MEMORY_CONTAINER_PREFIX}*"))
+            assert len(residue) == 1
+            shutil.rmtree(residue[0])
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            tempfile.TemporaryDirectory() as victim_raw,
+        ):
+            provisioning_root = Path(raw).resolve()
+            provisioning_root.chmod(0o1777)
+            victim = Path(victim_raw).resolve()
+            victim_file = victim / "must-survive.txt"
+            victim_file.write_text("fixture", encoding="ascii")
+            moved_original = provisioning_root / "moved-original"
+
+            def replace_container_before_failure(_descriptor: int, mode: int) -> None:
+                assert mode == 0o711
+                created = next(
+                    provisioning_root.glob(f"{process_tree_sampler.BROWSER_SHARED_MEMORY_CONTAINER_PREFIX}*")
+                )
+                created.rename(moved_original)
+                os.symlink(victim, created, target_is_directory=True)
+                raise OSError(errno.EIO, "fixture post-bind failure")
+
+            with mock.patch.object(
+                process_tree_sampler.os,
+                "fchmod",
+                side_effect=replace_container_before_failure,
+            ):
+                replaced_provisioning = captured_incomplete(
+                    "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+                    lambda: process_tree_sampler.create_browser_shared_memory(
+                        fixture_account,
+                        root=provisioning_root,
+                        broker_uid=os.getuid(),
+                        broker_gid=os.getgid(),
+                        filesystem_type=lambda _path: "tmpfs",
+                    ),
+                )
+            replaced_diagnostic = json.loads(str(replaced_provisioning).split("diagnostic=", 1)[1])
+            assert replaced_diagnostic["cleanup"]["code"] == "BROWSER_SHARED_MEMORY_REPLACED"
+            replacement = next(
+                provisioning_root.glob(f"{process_tree_sampler.BROWSER_SHARED_MEMORY_CONTAINER_PREFIX}*")
+            )
+            assert replacement.is_symlink()
+            assert moved_original.is_dir()
+            assert victim_file.read_text(encoding="ascii") == "fixture"
+            replacement.unlink()
+            shutil.rmtree(moved_original)
+    assert runtime_target(("/repo/benchmarks/adapters/browsershot/adapter.php", "render")) == BROWSERSHOT_TARGET
+    assert runtime_target(("/repo/benchmarks/adapters/dompdf/adapter.php", "render")) == GENERIC_TARGET
+    assert runtime_target(("/usr/lib/pliego", "render-api2")) == GENERIC_TARGET
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_root = Path(raw)
+        older = runtime_root / "home" / "older.bin"
+        newer = runtime_root / "xdg-cache" / "newer.bin"
+        older.parent.mkdir()
+        newer.parent.mkdir()
+        older.write_bytes(b"old")
+        newer.write_bytes(b"newest")
+        os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
+        runtime_metadata = runtime_root.stat()
+        runtime_identity = (runtime_metadata.st_dev, runtime_metadata.st_ino)
+        diagnostics = process_tree_sampler.runtime_directory_diagnostics(runtime_root, runtime_identity, limit=1)
+    assert "xdg-cache/newer.bin:file:size=6" in diagnostics
+    assert "home/older.bin" not in diagnostics
+    assert "browser-runtime-file-count=2" in diagnostics
+    with tempfile.TemporaryDirectory() as raw:
+        exact_root = Path(raw).resolve()
+        for index in range(3):
+            (exact_root / f"exact-{index}").write_text("fixture", encoding="ascii")
+        exact_metadata = exact_root.stat()
+        exact_identity = (exact_metadata.st_dev, exact_metadata.st_ino)
+        exact_inventory = process_tree_sampler.runtime_directory_diagnostics(exact_root, exact_identity, scan_limit=3)
+        (exact_root / "overflow").write_text("fixture", encoding="ascii")
+        with mock.patch.object(
+            process_tree_sampler.os,
+            "listdir",
+            side_effect=AssertionError("bounded diagnostics must stream directory entries"),
+        ):
+            truncated_inventory = process_tree_sampler.runtime_directory_diagnostics(
+                exact_root, exact_identity, scan_limit=3
+            )
+    assert "browser-runtime-entries-examined=3" in exact_inventory
+    assert "browser-runtime-scan-truncated=false" in exact_inventory
+    assert "browser-runtime-scan-truncated=true" in truncated_inventory
+
+    with mock.patch.object(
+        process_tree_sampler, "runtime_directory_diagnostics", side_effect=RuntimeError("must not escape")
+    ):
+        unavailable = process_tree_sampler.browser_failure_diagnostics(Path("/fixture"), (1, 2))
+    assert unavailable == "browser-runtime-inventory-unavailable=RuntimeError:unknown"
+    assert "must not escape" not in unavailable
+    with tempfile.TemporaryDirectory() as raw:
+        output = Path(raw) / "engine.stderr"
+        output.write_bytes(b"prefix\n" + b"x" * 32)
+        assert process_tree_sampler.bounded_output_tail(output, limit=8) == json.dumps("x" * 8)
+        metadata = process_tree_sampler.output_path_metadata(output)
+        assert metadata["status"] == "present"
+        assert metadata["kind"] == "file"
+        assert metadata["size"] == 39
+        assert metadata["blocks"] >= 0
+        missing = process_tree_sampler.bounded_output_tail(Path(raw) / "missing")
+        assert missing.startswith("unavailable:FileNotFoundError:")
+        assert process_tree_sampler.output_path_metadata(Path(raw) / "missing")["status"] == "unavailable"
+
+        sandbox = Path(raw) / "sandbox"
+        cwd = sandbox / "job"
+        temporary = sandbox / "temporary"
+        cwd.mkdir(parents=True)
+        temporary.mkdir()
+        (cwd / "delivery.json").write_text("fixture", encoding="ascii")
+        stdout = Path(raw) / "engine.stdout"
+        stdout.write_text("result", encoding="ascii")
+        temporary_metadata = temporary.stat()
+        sandbox_metadata = sandbox.stat()
+        failure = process_tree_sampler.engine_failure_diagnostics(
+            cwd,
+            temporary,
+            stdout,
+            output,
+            (temporary_metadata.st_dev, temporary_metadata.st_ino),
+            {"sandbox": (sandbox_metadata.st_dev, sandbox_metadata.st_ino)},
+        )
+        assert "engine-temporary-file-count=0" in failure
+        assert "engine-sandbox-files-newest=" in failure
+        assert "job/delivery.json:file:size=7" in failure
+        assert 'engine-output-metadata={"stderr":{"blocks":' in failure
+        assert '"stdout":{"blocks":' in failure
+        assert 'engine-stderr-tail="prefix\\n' in failure
+    if sys.platform == "linux":
+        with tempfile.TemporaryDirectory() as raw:
+            controlled = Path(raw).resolve()
+            temporary = controlled / "temporary"
+            outside = controlled / "outside"
+            temporary.mkdir()
+            outside.mkdir()
+            (outside / "must-not-leak").write_text("sentinel", encoding="ascii")
+            temporary_metadata = temporary.stat()
+            expected_identity = (temporary_metadata.st_dev, temporary_metadata.st_ino)
+            temporary.rmdir()
+            temporary.symlink_to(outside, target_is_directory=True)
+            replaced = process_tree_sampler.directory_diagnostics(temporary, "engine-temporary", expected_identity)
+        assert replaced.startswith("engine-temporary-inventory-unavailable=")
+        assert "must-not-leak" not in replaced
+        with tempfile.TemporaryDirectory() as raw:
+            diagnostic_root = Path(raw).resolve()
+            (diagnostic_root / "nested").mkdir()
+            root_metadata = diagnostic_root.stat()
+            root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+            real_fstat = process_tree_sampler.os.fstat
+
+            def fail_child_fstat(descriptor: int) -> os.stat_result:
+                metadata = real_fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) != root_identity:
+                    raise OSError(5, "injected child fstat failure")
+                return metadata
+
+            descriptors_before = len(list(Path("/proc/self/fd").iterdir()))
+            with mock.patch.object(process_tree_sampler.os, "fstat", side_effect=fail_child_fstat):
+                unavailable_child = process_tree_sampler.directory_diagnostics(
+                    diagnostic_root, "engine-temporary", root_identity
+                )
+            descriptors_after = len(list(Path("/proc/self/fd").iterdir()))
+        assert unavailable_child == "engine-temporary-inventory-unavailable=OSError:5"
+        assert descriptors_after == descriptors_before
+    if sys.platform == "linux":
+        with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
+            root = Path(raw).resolve()
+            nested = root / "nested mount"
+            leaf = nested / "leaf"
+            leaf.mkdir(parents=True)
+            escaped_root = str(root).replace(" ", "\\040")
+            escaped_nested = str(nested).replace(" ", "\\040")
+            mountinfo = (
+                f"36 25 8:1 / {escaped_root} rw,relatime - ext4 /dev/root rw\n"
+                f"37 36 8:2 / {escaped_nested} rw,relatime - xfs /dev/fixture rw\n"
+            )
+            assert process_tree_sampler.decode_mountinfo_path(escaped_nested) == str(nested)
+            assert process_tree_sampler.mountinfo_filesystem_type(root, mountinfo) == "ext4"
+            assert process_tree_sampler.mountinfo_filesystem_type(leaf, mountinfo) == "xfs"
+
+        with tempfile.TemporaryDirectory() as raw:
+            capture_root = Path(raw).resolve()
+            capture_root.chmod(0o1777)
+            stdout_path = capture_root / "pliego-bench-out-fixture"
+            stderr_path = capture_root / "pliego-bench-err-fixture"
+            stdout_path.write_bytes(b"")
+            stderr_path.write_bytes(b"")
+            stdout_path.chmod(0o600)
+            stderr_path.chmod(0o600)
+            broker_uid = os.getuid()
+            broker_gid = os.getgid()
+            capture_account = process_tree_sampler.EngineAccount(
+                "fixture-engine",
+                broker_uid + 10000,
+                broker_gid + 10000,
+                process_tree_sampler.ENGINE_ACCOUNT_HOME,
+            )
+            with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="tmpfs"):
+                output_before = process_tree_sampler.engine_output_capture_snapshot(
+                    stdout_path,
+                    stderr_path,
+                    capture_account,
+                    capture_root=capture_root,
+                    broker_uid=broker_uid,
+                    broker_gid=broker_gid,
+                )
+                assert output_before["root"]["mode"] == 0o1777
+                assert output_before["streams"]["stdout"]["mode"] == 0o600
+                descriptor = process_tree_sampler.open_bound_engine_output(str(stdout_path), output_before, "stdout")
+                os.close(descriptor)
+                assert (
+                    process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        expected=output_before,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    )
+                    == output_before
+                )
+                stdout_path.write_bytes(b"xx")
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_LIMIT_EXCEEDED",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        expected=output_before,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                        max_bytes_per_stream=1,
+                    ),
+                )
+                stdout_path.write_bytes(b"")
+                hard_link = capture_root / "hard-link"
+                os.link(stdout_path, hard_link)
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+                hard_link.unlink()
+
+                replacement = capture_root / "replacement"
+                replacement.write_bytes(b"")
+                replacement.chmod(0o600)
+                stdout_path.unlink()
+                replacement.rename(stdout_path)
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_REPLACED",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        expected=output_before,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_REPLACED",
+                    lambda: process_tree_sampler.open_bound_engine_output(str(stdout_path), output_before, "stdout"),
+                )
+                stdout_path.chmod(0o666)
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+                stdout_path.chmod(0o600)
+                capture_root.chmod(0o0777)
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+                capture_root.chmod(0o1777)
+
+            with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="ext4"):
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_BACKING_UNSAFE",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="ext4"),
+            mock.patch.object(
+                process_tree_sampler,
+                "directory_inode_flags",
+                return_value=(
+                    process_tree_sampler.FS_DIRSYNC_FL
+                    | process_tree_sampler.FS_SYNC_FL
+                    | process_tree_sampler.FS_NOATIME_FL
+                ),
+            ),
+            mock.patch.object(
+                process_tree_sampler,
+                "controlled_storage_root_identity",
+                side_effect=process_tree_sampler.engine_temporary_directory_identity,
+            ),
+        ):
+            root = Path(raw).resolve()
+            artifacts = root / "artifacts"
+            temporary = root / "temporary"
+            artifacts.mkdir(mode=0o700)
+            temporary.mkdir(mode=0o700)
+            current_account = process_tree_sampler.EngineAccount(
+                "fixture-engine",
+                os.getuid(),
+                os.getgid(),
+                process_tree_sampler.ENGINE_ACCOUNT_HOME,
+            )
+            native_sandbox = root / "native-sandbox"
+            native_job = native_sandbox / "job"
+            native_temporary = native_sandbox / "temporary"
+            native_sandbox.mkdir(mode=0o700)
+            native_job.mkdir(mode=0o700)
+            native_temporary.mkdir(mode=0o700)
+            (native_job / "input").mkdir(mode=0o700)
+            (native_job / "input-manifest.json").write_bytes(b"{}\n")
+            (native_job / "input-manifest.json").chmod(0o600)
+            native_bindings = process_tree_sampler.bind_native_api2_storage(
+                native_job,
+                native_temporary,
+                current_account,
+                require_pristine_job=True,
+            )
+            assert native_bindings == {
+                "controlled_root": process_tree_sampler.engine_temporary_directory_identity(root),
+                "sandbox": process_tree_sampler.engine_temporary_directory_identity(native_sandbox),
+                "job": process_tree_sampler.engine_temporary_directory_identity(native_job),
+                "temporary": process_tree_sampler.engine_temporary_directory_identity(native_temporary),
+            }
+
+            wrong_job = native_sandbox / "work"
+            wrong_job.mkdir(mode=0o700)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(wrong_job, native_temporary, current_account),
+            )
+            wrong_temporary = native_sandbox / "scratch"
+            wrong_temporary.mkdir(mode=0o700)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(native_job, wrong_temporary, current_account),
+            )
+            other_sandbox = root / "other-native-sandbox"
+            other_temporary = other_sandbox / "temporary"
+            other_sandbox.mkdir(mode=0o700)
+            other_temporary.mkdir(mode=0o700)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(native_job, other_temporary, current_account),
+            )
+
+            unexpected_job_entry = native_job / "unexpected"
+            unexpected_job_entry.write_bytes(b"unexpected")
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job,
+                    native_temporary,
+                    current_account,
+                    require_pristine_job=True,
+                ),
+            )
+            unexpected_job_entry.unlink()
+            unexpected_scratch_entry = native_temporary / "unexpected"
+            unexpected_scratch_entry.write_bytes(b"unexpected")
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job,
+                    native_temporary,
+                    current_account,
+                    require_pristine_job=True,
+                ),
+            )
+            unexpected_scratch_entry.unlink()
+
+            original_input = native_job / "real-input"
+            (native_job / "input").rename(original_input)
+            (native_job / "input").symlink_to(original_input, target_is_directory=True)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job,
+                    native_temporary,
+                    current_account,
+                    require_pristine_job=True,
+                ),
+            )
+            (native_job / "input").unlink()
+            original_input.rename(native_job / "input")
+
+            with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="tmpfs"):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_BACKING_UNSAFE",
+                    lambda: process_tree_sampler.bind_native_api2_storage(
+                        native_job, native_temporary, current_account
+                    ),
+                )
+            required_flags = (
+                process_tree_sampler.FS_DIRSYNC_FL
+                | process_tree_sampler.FS_SYNC_FL
+                | process_tree_sampler.FS_NOATIME_FL
+            )
+            for missing_flag in (
+                process_tree_sampler.FS_DIRSYNC_FL,
+                process_tree_sampler.FS_SYNC_FL,
+                process_tree_sampler.FS_NOATIME_FL,
+            ):
+                with mock.patch.object(
+                    process_tree_sampler,
+                    "directory_inode_flags",
+                    return_value=required_flags & ~missing_flag,
+                ):
+                    must_be_incomplete(
+                        "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                        lambda: process_tree_sampler.bind_native_api2_storage(
+                            native_job, native_temporary, current_account
+                        ),
+                    )
+
+            replaced_job = native_sandbox / "replaced-job"
+            native_job.rename(replaced_job)
+            native_job.mkdir(mode=0o700)
+            (native_job / "input").mkdir(mode=0o700)
+            (native_job / "input-manifest.json").write_bytes(b"{}\n")
+            (native_job / "input-manifest.json").chmod(0o600)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_REPLACED",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job,
+                    native_temporary,
+                    current_account,
+                    expected=native_bindings,
+                ),
+            )
+
+            runtime_environment = process_tree_sampler.prepare_runtime_directories(temporary, current_account)
+            assert runtime_environment == {
+                variable: str(temporary / name)
+                for variable, name in process_tree_sampler.RUNTIME_DIRECTORY_NAMES.items()
+            }
+            root_identity = process_tree_sampler.engine_temporary_directory_identity(temporary)
+            runtime_binding = process_tree_sampler.runtime_directory_bindings(
+                temporary, root_identity, runtime_environment, current_account
+            )
+            expected_identities = {
+                variable: (binding["identity"]["device"], binding["identity"]["inode"])
+                for variable, binding in runtime_binding["bindings"].items()
+            }
+            assert (
+                process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, runtime_environment, current_account, expected_identities
+                )
+                == runtime_binding
+            )
+            late_runtime_file = Path(runtime_environment["XDG_CACHE_HOME"]) / "late-state.bin"
+            late_runtime_file.write_bytes(b"late")
+            must_be_incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_NOT_EMPTY",
+                lambda: process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, runtime_environment, current_account, expected_identities
+                ),
+            )
+            late_runtime_file.unlink()
+            unexpected_root_entry = temporary / "late-root-state.bin"
+            unexpected_root_entry.write_bytes(b"late")
+            must_be_incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_NOT_EMPTY",
+                lambda: process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, runtime_environment, current_account, expected_identities
+                ),
+            )
+            unexpected_root_entry.unlink()
+            escaped = dict(runtime_environment)
+            escaped["HOME"] = str(root)
+            must_be_incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_UNSAFE",
+                lambda: process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, escaped, current_account
+                ),
+            )
+            original_home = temporary / process_tree_sampler.RUNTIME_DIRECTORY_NAMES["HOME"]
+            replaced_home = temporary / "replaced-home"
+            original_home.rename(replaced_home)
+            original_home.mkdir(mode=0o700)
+            original_home.chmod(0o700)
+            must_be_incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_REPLACED",
+                lambda: process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, runtime_environment, current_account, expected_identities
+                ),
+            )
+            adapter_command = ("/adapter", "render", "input.html", "--artifacts", str(artifacts))
+            assert process_tree_sampler.engine_temporary_directory(
+                adapter_command, current_account, str(temporary)
+            ) == str(temporary)
+            must_be_incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_REQUIRED",
+                lambda: process_tree_sampler.engine_temporary_directory(adapter_command, current_account, None),
+            )
+            assert process_tree_sampler.engine_temporary_directory(
+                ("/pliego", "render-api2"), current_account, str(artifacts)
+            ) == str(artifacts)
+            identity = process_tree_sampler.engine_temporary_directory_identity(artifacts)
+            process_tree_sampler.revalidate_engine_temporary_directory(artifacts, current_account, identity)
+            must_be_incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_REPLACED",
+                lambda: process_tree_sampler.revalidate_engine_temporary_directory(
+                    artifacts, current_account, (identity[0], identity[1] + 1)
+                ),
+            )
+            must_be_incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_REQUIRED",
+                lambda: process_tree_sampler.engine_temporary_directory(
+                    ("/pliego", "render-api2"), current_account, None
+                ),
+            )
+            artifacts.chmod(0o755)
+            must_be_incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                lambda: process_tree_sampler.engine_temporary_directory(
+                    adapter_command, current_account, str(temporary)
+                ),
+            )
+            artifacts.chmod(0o700)
+            with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="tmpfs"):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_BACKING_UNSAFE",
+                    lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
+                )
+            with mock.patch.object(
+                process_tree_sampler,
+                "directory_inode_flags",
+                return_value=process_tree_sampler.FS_SYNC_FL | process_tree_sampler.FS_NOATIME_FL,
+            ):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                    lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
+                )
+            with mock.patch.object(
+                process_tree_sampler,
+                "directory_inode_flags",
+                return_value=process_tree_sampler.FS_DIRSYNC_FL | process_tree_sampler.FS_NOATIME_FL,
+            ):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                    lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
+                )
+            with mock.patch.object(
+                process_tree_sampler,
+                "directory_inode_flags",
+                return_value=process_tree_sampler.FS_DIRSYNC_FL | process_tree_sampler.FS_SYNC_FL,
+            ):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                    lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
+                )
+
+    with tempfile.TemporaryDirectory() as raw:
+        cgroup_root = Path(raw).resolve()
+        staging_path = cgroup_root / "staging"
+        staging_path.mkdir()
+        staging = process_tree_sampler.BoundDirectory(staging_path, -1, 1, 2)
+        pid = 123
+        stopped = (process_tree_sampler.signal.SIGSTOP << 8) | 0x7F
+        network = {
+            "mode": "linux-private-network-namespace-v1",
+            "host_namespace": "net:[1]",
+            "engine_namespace": "net:[2]",
+            "interfaces": ["lo"],
+        }
+        handshake = {
+            "ok": True,
+            "browser_tmpdir": None,
+            "cwd": "/fixture/job",
+            "tmpdir": "/fixture/temporary",
+            "executable_accessible": True,
+            "executable_writable": False,
+            "cwd_accessible": True,
+            "migration_write_probes": {
+                name: {"cgroup.procs": "EACCES", "cgroup.threads": "EPERM"}
+                for name in ("parent", "harness", "staging", "measurement")
+            },
+            "network_isolation": network,
+        }
+        security = {
+            "uid": [fixture_account.uid] * 4,
+            "gid": [fixture_account.gid] * 4,
+            "supplementary_groups": [],
+            "cap_inheritable_hex": "0",
+            "cap_permitted_hex": "0",
+            "cap_effective_hex": "0",
+            "cap_bounding_hex": "0",
+            "cap_ambient_hex": "0",
+            "no_new_privs": 1,
+        }
+
+        def namespace(path: Path) -> str:
+            return (
+                network["host_namespace"] if path.parts[-3:] == ("self", "ns", "net") else network["engine_namespace"]
+            )
+
+        with (
+            mock.patch.object(process_tree_sampler.os, "kill"),
+            mock.patch.object(process_tree_sampler.os, "waitpid", return_value=(pid, stopped)),
+            mock.patch.object(process_tree_sampler.os, "read", return_value=json.dumps(handshake).encode()),
+            mock.patch.object(process_tree_sampler.os, "close"),
+            mock.patch.object(process_tree_sampler.os, "readlink", side_effect=namespace),
+            mock.patch.object(process_tree_sampler, "read_stat", return_value={"start_ticks": 77}),
+            mock.patch.object(process_tree_sampler, "cgroup_relative", return_value="/staging"),
+            mock.patch.object(process_tree_sampler, "cgroup_pids", return_value=[pid]),
+            mock.patch.object(process_tree_sampler, "read_process_security", return_value=security),
+        ):
+            retained = process_tree_sampler.finish_authority_handshake(
+                pid,
+                42,
+                fixture_account,
+                staging,
+                cgroup_root,
+                (pid, 77),
+                cgroup_root,
+            )
+        assert retained["network_isolation"] == network
+        assert retained["launch_context"] == {
+            "browser_tmpdir": None,
+            "cwd": "/fixture/job",
+            "tmpdir": "/fixture/temporary",
+        }
+
+    with tempfile.TemporaryDirectory() as raw:
+        executable = Path(raw) / "true"
+        shutil.copy2(shutil.which("true") or "/bin/true", executable)
+        executable.chmod(0o555)
+        must_be_incomplete(
+            "ENGINE_COMMAND_INVALID",
+            lambda: process_tree_sampler.command_identity([str(executable.resolve())], fixture_account),
+        )
+        argv, _ = process_tree_sampler.command_identity(
+            [str(executable.resolve()), "render-api2"],
+            fixture_account,
+        )
+        assert argv == (str(executable.resolve()), "render-api2")
+        adapter_argv, _ = process_tree_sampler.command_identity(
+            [str(executable.resolve()), "render", "input.html"],
+            fixture_account,
+        )
+        assert adapter_argv == (str(executable.resolve()), "render", "input.html")
+        must_be_incomplete(
+            "ENGINE_COMMAND_INVALID",
+            lambda: process_tree_sampler.command_identity(
+                [str(executable.resolve()), "render-api2", "--unexpected"],
+                fixture_account,
+            ),
+        )
+        with (
+            mock.patch.object(process_tree_sampler, "require_broker_root"),
+            mock.patch.object(process_tree_sampler, "resolve_engine_account", return_value=fixture_account),
+            mock.patch.object(process_tree_sampler, "require_delegated_parent") as delegated,
+        ):
+            must_be_incomplete(
+                "ENGINE_COMMAND_INVALID",
+                lambda: process_tree_sampler.sample_command(
+                    [str(executable.resolve())],
+                    raw,
+                    os.devnull,
+                    os.devnull,
+                    1,
+                    1,
+                    0,
+                    1,
+                    Path(raw),
+                ),
+            )
+            delegated.assert_not_called()
+
+    if sys.platform == "linux" and os.geteuid() == 0:
+        with tempfile.TemporaryDirectory() as raw:
+            stdin_path = (Path(raw) / "request.json").resolve()
+            stdin_path.write_bytes(b"{}\n")
+            stdin_path.chmod(0o400)
+            descriptor = process_tree_sampler.open_stdin_descriptor(str(stdin_path))
+            try:
+                assert os.read(descriptor, 3) == b"{}\n"
+            finally:
+                os.close(descriptor)
+            stdin_path.chmod(0o600)
+            must_be_incomplete(
+                "ENGINE_STDIN_MUTABLE",
+                lambda: process_tree_sampler.open_stdin_descriptor(str(stdin_path)),
+            )
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        directory.chmod(0o755)
+        root, parent, proc = delegated_fixture(directory)
+        delegation = require_fixture_parent(parent, root, proc)
+        assert delegation.path == parent
+        delegation.close()
+
+        (parent / "cgroup.type").unlink()
+        must_be_incomplete("CGROUP_INTERFACES_MISSING", lambda: require_fixture_parent(parent, root, proc))
+        (parent / "cgroup.type").write_text("domain\n", encoding="ascii")
+
+        (parent / "cgroup.procs").chmod(0o666)
+        must_be_incomplete("CGROUP_PERMISSIONS_UNSAFE", lambda: require_fixture_parent(parent, root, proc))
+        (parent / "cgroup.procs").chmod(0o644)
+
+        (proc / "self" / "cgroup").write_text("0::/delegated/other\n", encoding="ascii")
+        must_be_incomplete(
+            "CGROUP_DELEGATION_INVALID",
+            lambda: require_fixture_parent(parent, root, proc),
+        )
+        (proc / "self" / "cgroup").write_text("0::/delegated/harness\n", encoding="ascii")
+        (parent / "cgroup.procs").write_text("123\n", encoding="ascii")
+        must_be_incomplete(
+            "CGROUP_PARENT_POPULATED",
+            lambda: require_fixture_parent(parent, root, proc),
+        )
+        (parent / "cgroup.procs").write_text("", encoding="ascii")
+
+        must_be_incomplete(
+            "CGROUP_PARENT_NOT_ABSOLUTE",
+            lambda: require_fixture_parent(Path("delegated"), root, proc),
+        )
+        link = directory / "delegated-link"
+        link.symlink_to(parent, target_is_directory=True)
+        must_be_incomplete(
+            "CGROUP_PARENT_NOT_CANONICAL",
+            lambda: require_fixture_parent(link, root, proc),
+        )
+
+        (parent / "cgroup.subtree_control").write_text("cpu memory pids\n", encoding="ascii")
+        must_be_incomplete(
+            "CGROUP_CONTROLLERS_MISSING",
+            lambda: require_fixture_parent(parent, root, proc),
+        )
+        (parent / "cgroup.subtree_control").write_text("cpu io memory pids\n", encoding="ascii")
+        (parent / "unexpected").mkdir()
+        must_be_incomplete(
+            "CGROUP_NOT_EXCLUSIVE",
+            lambda: require_fixture_parent(parent, root, proc),
+        )
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        directory.chmod(0o755)
+        root, proc = delegated_namespace_root_fixture(directory)
+        delegation = process_tree_sampler.require_delegated_parent(
+            root,
+            root,
+            proc,
+            os.getuid(),
+            os.getgid(),
+        )
+        assert delegation.path == root
+        delegation.close()
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        root = directory / "root"
+        parent = root / "parent"
+        parent.mkdir(parents=True)
+        bound_parent = process_tree_sampler.open_bound_directory(parent, root)
+        collision_target = parent / "collision-target"
+        collision_target.mkdir()
+        collision_name = f"pliego-render-{os.getpid()}-fixed"
+        (parent / collision_name).symlink_to(collision_target, target_is_directory=True)
+        with mock.patch.object(process_tree_sampler.secrets, "token_hex", return_value="fixed"):
+            must_be_incomplete("CGROUP_CREATE_FAILED", lambda: process_tree_sampler.create_leaf(bound_parent))
+        assert collision_target.is_dir()
+
+        leaf_path = parent / "leaf"
+        counter_fixture(leaf_path)
+        (leaf_path / "cgroup.procs").write_text("", encoding="ascii")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        leaf_fd = os.open("leaf", flags, dir_fd=bound_parent.fd)
+        leaf_stat = os.fstat(leaf_fd)
+        bound_leaf = process_tree_sampler.BoundDirectory(
+            leaf_path,
+            leaf_fd,
+            leaf_stat.st_dev,
+            leaf_stat.st_ino,
+            bound_parent.fd,
+            "leaf",
+        )
+        moved = parent / "moved-leaf"
+        leaf_path.rename(moved)
+        leaf_path.symlink_to(collision_target, target_is_directory=True)
+        must_be_incomplete(
+            "CGROUP_PATH_REPLACED",
+            lambda: process_tree_sampler.remove_bound_leaf(bound_leaf, bound_parent),
+        )
+        assert leaf_path.is_symlink() and moved.is_dir() and collision_target.is_dir()
+        bound_leaf.close()
+        bound_parent.close()
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        cgroup = directory / "leaf"
+        counter_fixture(cgroup)
+        bound = process_tree_sampler.open_bound_directory(cgroup, directory)
+        snapshot, settle = process_tree_sampler.wait_for_accounting_quiescence(bound, 1.0, 20.0)
+        assert snapshot["memory_file_dirty_bytes"] == 0
+        assert settle["reads"] == 2 and settle["stable_reads"] == 2
+        assert settle["reclaim"] == {
+            "triggered": False,
+            "requested_bytes": 0,
+            "write_result": "not-needed",
+            "before": {
+                "memory_current_bytes": 0,
+                "memory_file_dirty_bytes": 0,
+                "memory_file_writeback_bytes": 0,
+            },
+            "after": {
+                "memory_current_bytes": 0,
+                "memory_file_dirty_bytes": 0,
+                "memory_file_writeback_bytes": 0,
+            },
+        }
+        dirty = process_tree_sampler.counter_snapshot(bound)
+        dirty.update(
+            memory_current_bytes=8192,
+            memory_peak_bytes=16384,
+            memory_file_dirty_bytes=4096,
+        )
+        clean = dict(dirty)
+        clean.update(memory_current_bytes=4096, memory_file_dirty_bytes=0)
+        clock = [100.0]
+
+        def delayed_reclaim(_cgroup: object, _requested_bytes: int) -> str:
+            clock[0] += 0.007
+            return "under-reclaimed"
+
+        with (
+            mock.patch.object(
+                process_tree_sampler,
+                "counter_snapshot",
+                side_effect=[dirty, clean, clean],
+            ),
+            mock.patch.object(
+                process_tree_sampler,
+                "request_cgroup_reclaim",
+                side_effect=delayed_reclaim,
+            ) as reclaim,
+            mock.patch.object(process_tree_sampler.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(
+                process_tree_sampler.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+            ),
+        ):
+            snapshot, settle = process_tree_sampler.wait_for_accounting_quiescence(bound, 1.0, 20.0)
+        reclaim.assert_called_once_with(bound, 8192)
+        assert snapshot == clean
+        assert settle["reads"] == 3
+        assert settle["duration_ms"] == 8.0
+        assert settle["reclaim"] == {
+            "triggered": True,
+            "requested_bytes": 8192,
+            "write_result": "under-reclaimed",
+            "before": {
+                "memory_current_bytes": 8192,
+                "memory_file_dirty_bytes": 4096,
+                "memory_file_writeback_bytes": 0,
+            },
+            "after": {
+                "memory_current_bytes": 4096,
+                "memory_file_dirty_bytes": 0,
+                "memory_file_writeback_bytes": 0,
+            },
+        }
+        populated = dict(dirty)
+        populated["cgroup_events"] = {"populated": 1, "frozen": 0}
+        with mock.patch.object(process_tree_sampler, "counter_snapshot", return_value=populated):
+            must_be_incomplete(
+                "CGROUP_RECLAIM_UNSAFE",
+                lambda: process_tree_sampler.wait_for_accounting_quiescence(bound, 1.0, 20.0),
+            )
+        with mock.patch.object(os, "write", side_effect=OSError(errno.EAGAIN, "under-reclaimed")):
+            assert process_tree_sampler.request_cgroup_reclaim(bound, 8192) == "under-reclaimed"
+        with mock.patch.object(os, "write", side_effect=OSError(errno.EPERM, "denied")):
+            must_be_incomplete(
+                "CGROUP_RECLAIM_FAILED",
+                lambda: process_tree_sampler.request_cgroup_reclaim(bound, 8192),
+            )
+        (cgroup / "memory.current").write_text("4096\n", encoding="ascii")
+        (cgroup / "memory.stat").write_text("file_dirty 1\nfile_writeback 0\n", encoding="ascii")
+        must_be_incomplete(
+            "CGROUP_ACCOUNTING_NOT_QUIESCENT",
+            lambda: process_tree_sampler.wait_for_accounting_quiescence(bound, 1.0, 3.0),
+        )
+        bound.close()
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        proc = directory / "proc"
+        cgroup = directory / "cgroup"
+        cgroup.mkdir()
+        root_pid = 4242
+        write_proc_stat(proc, root_pid, 101)
+        (cgroup / "cgroup.procs").write_text(f"{root_pid}\n", encoding="ascii")
+        bound = process_tree_sampler.open_bound_directory(cgroup, directory)
+        must_be_incomplete(
+            "ROOT_IDENTITY_CHANGED",
+            lambda: process_tree_sampler.scan_cgroup(bound, False, (root_pid, 100), proc),
+        )
+        bound.close()
+
+    with tempfile.TemporaryDirectory() as raw:
+        lock_root = Path(raw)
+        parent = lock_root / "parent"
+        parent.mkdir()
+        with process_tree_sampler.exclusive_parent_lock(parent, lock_root):
+            must_be_incomplete(
+                "CGROUP_BUSY",
+                lambda: process_tree_sampler.exclusive_parent_lock(parent, lock_root).__enter__(),
+            )
+
+    assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
+    assert validate_result.percentile([1, 3], 50) == 1
+
+    env = os.environ.copy()
+    env.pop("PLIEGO_BENCHMARK_CGROUP_PARENT", None)
+    missing = subprocess.run(
+        [sys.executable, str(SAMPLER), "--", sys.executable, "-c", "raise SystemExit(99)"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+    assert missing.returncode == 2
+    assert "measurement-incomplete[CGROUP_PARENT_REQUIRED]" in missing.stderr
+    env["PLIEGO_BENCHMARK_CGROUP_PARENT"] = "/nonexistent-fixture-parent"
+    missing_capture = subprocess.run(
+        [sys.executable, str(SAMPLER), "--", sys.executable, "-c", "raise SystemExit(99)"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+    assert missing_capture.returncode == 2
+    assert "measurement-incomplete[ENGINE_OUTPUT_CAPTURE_REQUIRED]" in missing_capture.stderr
 
 
 def child_workload(mebibytes: int, duration: float) -> int:
     allocation = bytearray(mebibytes * 1024 * 1024)
     for offset in range(0, len(allocation), 4096):
         allocation[offset] = (offset // 4096) % 251
-    with tempfile.TemporaryFile() as output:
-        output.write(b"x" * 1024 * 1024)
-        output.flush()
-        os.fsync(output.fileno())
-        time.sleep(duration)
+    time.sleep(duration)
     return allocation[0]
 
 
@@ -41,32 +1537,301 @@ def parent_workload(mebibytes: int, duration: float) -> int:
             [sys.executable, __file__, "--workload-child", str(mebibytes), str(duration)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=index == 1,
         )
-        for _ in range(2)
+        for index in range(2)
     ]
     return max(child.wait() for child in children)
 
 
-def workload_command(mebibytes: int = 32, duration: float = 0.8) -> list[str]:
-    return [sys.executable, __file__, "--workload-parent", str(mebibytes), str(duration)]
-
-
-def sampled(command: list[str]) -> dict:
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(SAMPLER),
-            "--interval-ms",
-            "75",
-            "--pss-interval-ms",
-            "250",
-            "--",
-            *command,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
+def leaking_parent(pid_path: str) -> int:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
+    with open(pid_path, "w", encoding="ascii") as output:
+        output.write(str(child.pid))
+        output.flush()
+        os.fsync(output.fileno())
+    return 0
+
+
+def migration_attack(parent: str) -> int:
+    for interface in ("cgroup.procs", "cgroup.threads"):
+        try:
+            with open(Path(parent) / interface, "w", encoding="ascii") as output:
+                output.write(f"{os.getpid()}\n")
+        except PermissionError as error:
+            if error.errno not in {errno.EACCES, errno.EPERM}:
+                return 91
+        else:
+            return 90
+    return parent_workload(4, 0.3)
+
+
+@contextlib.contextmanager
+def workload_engine(arguments: list[str] | None = None, browser_target: bool = False) -> Iterator[str]:
+    arguments = arguments or ["--workload-parent", "32", "0.8"]
+    embedded_child = """import sys
+import time
+
+mebibytes = int(sys.argv[1])
+duration = float(sys.argv[2])
+allocation = bytearray(mebibytes * 1024 * 1024)
+for offset in range(0, len(allocation), 4096):
+    allocation[offset] = (offset // 4096) % 251
+time.sleep(duration)
+raise SystemExit(allocation[0])
+"""
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        directory.chmod(0o755)
+        engine = (
+            directory / "benchmarks" / "adapters" / "browsershot" / "adapter.php"
+            if browser_target
+            else directory / "fixture-engine.py"
+        )
+        engine.parent.mkdir(parents=True, exist_ok=True)
+        for parent in [engine.parent, *engine.parent.parents]:
+            if parent == directory.parent:
+                break
+            parent.chmod(0o755)
+        engine.write_text(
+            f"""#!/usr/bin/env python3
+import array
+import errno
+import fcntl
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+ARGUMENTS = {arguments!r}
+DIRTY_CACHE_FILENAME = {DIRTY_CACHE_FILENAME!r}
+FS_IOC_GETFLAGS = 0x80086601
+FS_IOC_SETFLAGS = 0x40086602
+FS_SYNC_FL = 0x00000008
+
+
+def parent_workload(mebibytes, duration):
+    child_program = {embedded_child!r}
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", child_program, str(mebibytes), str(duration)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=index == 1,
+        )
+        for index in range(2)
+    ]
+    return max(child.wait() for child in children)
+
+
+def leaking_parent(pid_path):
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    with open(pid_path, "w", encoding="ascii") as output:
+        output.write(str(child.pid))
+        output.flush()
+        os.fsync(output.fileno())
+    return 0
+
+
+def migration_attack(parent):
+    for interface in ("cgroup.procs", "cgroup.threads"):
+        try:
+            with open(Path(parent) / interface, "w", encoding="ascii") as output:
+                output.write(f"{{os.getpid()}}\\n")
+        except PermissionError as error:
+            if error.errno not in {{errno.EACCES, errno.EPERM}}:
+                return 91
+        else:
+            return 90
+    return parent_workload(4, 0.3)
+
+
+def output_workload():
+    os.write(1, b"fixture stdout\\n")
+    os.write(2, b"fixture stderr\\n")
+    return 0
+
+
+def dirty_cache_workload():
+    path = Path(os.environ["TMPDIR"]) / DIRTY_CACHE_FILENAME
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC, 0o600)
+    try:
+        flags = array.array("I", [0])
+        fcntl.ioctl(descriptor, FS_IOC_GETFLAGS, flags, True)
+        flags[0] &= ~FS_SYNC_FL
+        fcntl.ioctl(descriptor, FS_IOC_SETFLAGS, flags)
+        verified = array.array("I", [0])
+        fcntl.ioctl(descriptor, FS_IOC_GETFLAGS, verified, True)
+        assert verified[0] & FS_SYNC_FL == 0
+        chunk = b"x" * (1024 * 1024)
+        for _ in range(16):
+            remaining = memoryview(chunk)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                assert written > 0
+                remaining = remaining[written:]
+    finally:
+        os.close(descriptor)
+    assert path.is_file() and path.stat().st_size == 16 * 1024 * 1024
+    return 0
+
+
+def browser_shared_memory_workload():
+    browser_tmpdir = Path(os.environ["PLIEGO_BENCHMARK_BROWSER_TMPDIR"])
+    assert browser_tmpdir.is_dir()
+    assert browser_tmpdir != Path(os.environ["TMPDIR"])
+    transient = browser_tmpdir / "fixture-unlinked-shared-memory"
+    transient.write_bytes(b"fixture")
+    transient.unlink()
+    return 0
+
+
+def browser_shared_memory_residue_workload():
+    browser_tmpdir = Path(os.environ["PLIEGO_BENCHMARK_BROWSER_TMPDIR"])
+    (browser_tmpdir / "fixture-retained-shared-memory").write_bytes(b"fixture residue")
+    return 0
+
+
+def main():
+    if ARGUMENTS[0] == "--workload-parent":
+        return parent_workload(int(ARGUMENTS[1]), float(ARGUMENTS[2]))
+    if ARGUMENTS[0] == "--workload-leak":
+        return leaking_parent(ARGUMENTS[1])
+    if ARGUMENTS[0] == "--workload-migration-attack":
+        return migration_attack(ARGUMENTS[1])
+    if ARGUMENTS[0] == "--workload-output":
+        return output_workload()
+    if ARGUMENTS[0] == "--workload-dirty-cache":
+        return dirty_cache_workload()
+    if ARGUMENTS[0] == "--workload-browser-shared-memory":
+        return browser_shared_memory_workload()
+    if ARGUMENTS[0] == "--workload-browser-shared-memory-residue":
+        return browser_shared_memory_residue_workload()
+    raise ValueError(f"unsupported fixture workload: {{ARGUMENTS!r}}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
+            encoding="utf-8",
+        )
+        engine.chmod(0o555)
+        yield str(engine.resolve())
+
+
+def workload_command(engine: str) -> list[str]:
+    return [engine, "render-api2"]
+
+
+@contextlib.contextmanager
+def live_output_capture_paths() -> Iterator[tuple[Path, Path]]:
+    paths: list[Path] = []
+    identities: list[tuple[int, int]] = []
+    try:
+        for prefix in ("pliego-bench-out-", "pliego-bench-err-"):
+            descriptor, raw = tempfile.mkstemp(prefix=prefix, dir=process_tree_sampler.ENGINE_OUTPUT_CAPTURE_ROOT)
+            try:
+                os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
+            path = Path(raw).resolve(strict=True)
+            metadata = path.stat(follow_symlinks=False)
+            paths.append(path)
+            identities.append((metadata.st_dev, metadata.st_ino))
+        yield paths[0], paths[1]
+    finally:
+        for path, identity in zip(paths, identities):
+            metadata = path.stat(follow_symlinks=False)
+            assert (metadata.st_dev, metadata.st_ino) == identity
+            path.unlink()
+            assert not path.exists()
+
+
+def sampled(
+    command: list[str],
+    descendant_grace_ms: float = 1000.0,
+    browser_target: bool = False,
+    expected_failure_code: str | None = None,
+    expected_linked_temporary_file: str | None = None,
+) -> dict:
+    account = process_tree_sampler.resolve_engine_account()
+    temporary_root = os.environ.get("PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT")
+    assert temporary_root, "live sampler proof requires PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT"
+    retained_path: Path | None = None
+    with tempfile.TemporaryDirectory(dir=temporary_root) as raw:
+        sandbox = Path(raw).resolve()
+        os.chown(sandbox, account.uid, account.gid)
+        sandbox.chmod(0o700)
+        job = sandbox / "job"
+        temporary = sandbox / "temporary"
+        if expected_linked_temporary_file is not None:
+            retained_path = temporary / expected_linked_temporary_file
+        artifacts = sandbox / "artifacts"
+        job.mkdir(mode=0o700)
+        temporary.mkdir(mode=0o700)
+        if browser_target:
+            artifacts.mkdir(mode=0o700)
+        (job / "input").mkdir(mode=0o700)
+        if browser_target:
+            (job / "input.html").write_text("<p>fixture</p>", encoding="utf-8")
+        (job / "input-manifest.json").write_bytes(b"{}\n")
+        paths = [job, temporary, job / "input", job / "input-manifest.json"]
+        if browser_target:
+            paths.extend([artifacts, job / "input.html"])
+        for path in paths:
+            os.chown(path, account.uid, account.gid)
+            path.chmod(0o700 if path.is_dir() else 0o600)
+        launched_command = (
+            [command[0], "render", "input.html", "--artifacts", str(artifacts)] if browser_target else command
+        )
+        with live_output_capture_paths() as (stdout_path, stderr_path):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SAMPLER),
+                    "--interval-ms",
+                    "75",
+                    "--pss-interval-ms",
+                    "250",
+                    "--descendant-grace-ms",
+                    str(descendant_grace_ms),
+                    "--cwd",
+                    str(job),
+                    "--temporary-directory",
+                    str(temporary),
+                    "--stdout",
+                    str(stdout_path),
+                    "--stderr",
+                    str(stderr_path),
+                    "--",
+                    *launched_command,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        if retained_path is not None:
+            assert retained_path.is_file()
+    if retained_path is not None:
+        assert not retained_path.exists()
+    if expected_failure_code is not None:
+        assert result.returncode == 2, result.stderr
+        assert f"measurement-incomplete[{expected_failure_code}]" in result.stderr, result.stderr
+        return {"stderr": result.stderr}
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -78,89 +1843,692 @@ def direct_wall_ms(command: list[str]) -> float:
     return (time.monotonic() - started) * 1000.0
 
 
-def percentile(values: list[float], fraction: float) -> float:
-    ordered = sorted(values)
-    rank = (len(ordered) - 1) * fraction
-    lower = int(rank)
-    upper = min(lower + 1, len(ordered) - 1)
-    weight = rank - lower
-    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+def assert_exact_counters(proof: dict) -> None:
+    final = proof["counters"]["final"]
+    io_stat = final["io_stat"]
+    assert proof["read_bytes"] == sum(device["rbytes"] for device in io_stat.values())
+    assert proof["write_bytes"] == sum(device["wbytes"] for device in io_stat.values())
+    assert proof["read_operations"] == sum(device["rios"] for device in io_stat.values())
+    assert proof["write_operations"] == sum(device["wios"] for device in io_stat.values())
+    assert proof["cpu_user_ms"] == round(final["cpu_stat"]["user_usec"] / 1000, 3)
+    assert proof["cpu_sys_ms"] == round(final["cpu_stat"]["system_usec"] / 1000, 3)
+    assert final["cgroup_events"]["populated"] == 0
+    assert final["memory_file_dirty_bytes"] == 0
+    assert final["memory_file_writeback_bytes"] == 0
 
 
-def recycled_root_pid_proof() -> None:
-    root_pid = 4242
-    original_start_ticks = 100
-    with tempfile.TemporaryDirectory() as directory:
-        proc = Path(directory)
-        recycled = proc / str(root_pid)
-        recycled.mkdir()
-        fields = [
-            "S", "1", str(root_pid), str(root_pid + 1), "0", "0", "0", "0", "0", "0", "0",
-            "1", "1", "0", "0", "20", "0", "1", "0", str(original_start_ticks + 1), "4096", "1",
-        ]
-        (recycled / "stat").write_text(f"{root_pid} (recycled) {' '.join(fields)}\n", encoding="ascii")
-        (recycled / "io").write_text("read_bytes: 0\nwrite_bytes: 0\n", encoding="ascii")
+def assert_validator_accepts(proof: dict, ok: bool) -> None:
+    diagnostics = proof["sampled_diagnostics"]
+    minimum_one_shot_wall_ms = round(
+        proof["wall_ms"] + proof["drain_ms"] + proof["accounting_settle"]["duration_ms"],
+        3,
+    )
+    sample = {
+        "ok": ok,
+        "exit_code": proof["exit_code"],
+        "signal": proof["signal"],
+        "wall_ms": proof["wall_ms"],
+        "one_shot_wall_ms": minimum_one_shot_wall_ms,
+        "user_ms": proof["cpu_user_ms"],
+        "sys_ms": proof["cpu_sys_ms"],
+        "memory_current_bytes": proof["memory_current_bytes"],
+        "memory_peak_bytes": proof["memory_peak_bytes"],
+        "sampled_peak_rss_kib_lower_bound": diagnostics["sampled_peak_summed_rss_kib_lower_bound"],
+        "sampled_peak_pss_kib_lower_bound": diagnostics["sampled_peak_summed_pss_kib_lower_bound"],
+        "read_bytes": proof["read_bytes"],
+        "write_bytes": proof["write_bytes"],
+        "read_operations": proof["read_operations"],
+        "write_operations": proof["write_operations"],
+        "measurement_method": proof["method"],
+        "resource_usage": proof,
+    }
+    violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(sample, "$.sample", violations)
+    assert not violations, "\n".join(map(str, violations))
 
-        original_proc = process_tree_sampler.PROC
-        process_tree_sampler.PROC = proc
+
+def assert_browser_shared_memory_removed(binding: process_tree_sampler.BrowserSharedMemoryBinding) -> None:
+    assert binding.cleaned
+    assert binding.root_fd == binding.container_fd == binding.directory_fd == -1
+    assert not binding.container.exists()
+
+
+def emergency_remove_live_browser_binding(binding: process_tree_sampler.BrowserSharedMemoryBinding) -> None:
+    """Keep a failed negative fixture from leaking, but only at its bound container identity."""
+
+    binding.close()
+    try:
+        metadata = binding.container.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    expected = binding.pre["container"]["identity"]
+    if (metadata.st_dev, metadata.st_ino) != (expected["device"], expected["inode"]):
+        return
+    shutil.rmtree(binding.container)
+
+
+def live_browser_shared_memory_negative_proofs(account: process_tree_sampler.EngineAccount) -> None:
+    mode_binding = process_tree_sampler.create_browser_shared_memory(account)
+    try:
+        mode_binding.directory.chmod(0o711)
+        captured_incomplete(
+            "BROWSER_SHARED_MEMORY_UNSAFE",
+            lambda: process_tree_sampler.cleanup_browser_shared_memory(mode_binding),
+        )
+        assert min(mode_binding.root_fd, mode_binding.container_fd, mode_binding.directory_fd) >= 0
+        process_tree_sampler.force_cleanup_browser_shared_memory(mode_binding)
+        assert_browser_shared_memory_removed(mode_binding)
+    finally:
+        emergency_remove_live_browser_binding(mode_binding)
+
+    owner_binding = process_tree_sampler.create_browser_shared_memory(account)
+    try:
+        os.chown(owner_binding.directory, 0, 0)
+        captured_incomplete(
+            "BROWSER_SHARED_MEMORY_UNSAFE",
+            lambda: process_tree_sampler.browser_shared_memory_snapshot(owner_binding),
+        )
+        process_tree_sampler.force_cleanup_browser_shared_memory(owner_binding)
+        assert_browser_shared_memory_removed(owner_binding)
+    finally:
+        emergency_remove_live_browser_binding(owner_binding)
+
+    residue_binding = process_tree_sampler.create_browser_shared_memory(account)
+    try:
+        (residue_binding.directory / "retained.bin").write_bytes(b"residue")
+        captured_incomplete(
+            "BROWSER_SHARED_MEMORY_NOT_EMPTY",
+            lambda: process_tree_sampler.cleanup_browser_shared_memory(residue_binding),
+        )
+        process_tree_sampler.force_cleanup_browser_shared_memory(residue_binding)
+        assert_browser_shared_memory_removed(residue_binding)
+    finally:
+        emergency_remove_live_browser_binding(residue_binding)
+
+    partial_binding = process_tree_sampler.create_browser_shared_memory(account)
+    try:
+        real_rmdir = process_tree_sampler.os.rmdir
+
+        def fail_container_removal_once(path: object, *args: object, **kwargs: object) -> None:
+            if path == partial_binding.container.name:
+                raise OSError(errno.EIO, "fixture container cleanup failure")
+            real_rmdir(path, *args, **kwargs)
+
+        with mock.patch.object(process_tree_sampler.os, "rmdir", side_effect=fail_container_removal_once):
+            captured_incomplete(
+                "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+                lambda: process_tree_sampler.cleanup_browser_shared_memory(partial_binding),
+            )
+        assert partial_binding.directory_unlinked is True
+        assert partial_binding.container_unlinked is False
+        assert min(partial_binding.root_fd, partial_binding.container_fd, partial_binding.directory_fd) >= 0
+        process_tree_sampler.force_cleanup_browser_shared_memory(partial_binding)
+        assert_browser_shared_memory_removed(partial_binding)
+    finally:
+        emergency_remove_live_browser_binding(partial_binding)
+
+    fully_unlinked_binding = process_tree_sampler.create_browser_shared_memory(account)
+    try:
+        real_rebind = process_tree_sampler.browser_shared_memory_cleanup_rebind
+        rebind_calls = 0
+
+        def fail_after_both_edges_unlinked(
+            binding: process_tree_sampler.BrowserSharedMemoryBinding,
+        ) -> None:
+            nonlocal rebind_calls
+            rebind_calls += 1
+            real_rebind(binding)
+            if rebind_calls == 3:
+                raise process_tree_sampler.incomplete(
+                    "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+                    "fixture failure after both named edges were removed",
+                )
+
+        with mock.patch.object(
+            process_tree_sampler,
+            "browser_shared_memory_cleanup_rebind",
+            side_effect=fail_after_both_edges_unlinked,
+        ):
+            captured_incomplete(
+                "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+                lambda: process_tree_sampler.cleanup_browser_shared_memory(fully_unlinked_binding),
+            )
+        assert fully_unlinked_binding.directory_unlinked is True
+        assert fully_unlinked_binding.container_unlinked is True
+        assert (
+            min(
+                fully_unlinked_binding.root_fd,
+                fully_unlinked_binding.container_fd,
+                fully_unlinked_binding.directory_fd,
+            )
+            >= 0
+        )
+        assert not fully_unlinked_binding.container.exists()
+        process_tree_sampler.force_cleanup_browser_shared_memory(fully_unlinked_binding)
+        assert_browser_shared_memory_removed(fully_unlinked_binding)
+    finally:
+        emergency_remove_live_browser_binding(fully_unlinked_binding)
+
+    with tempfile.TemporaryDirectory(dir=process_tree_sampler.BROWSER_SHARED_MEMORY_ROOT) as victim_raw:
+        victim = Path(victim_raw).resolve()
+        victim_file = victim / "must-survive.txt"
+        victim_file.write_text("fixture", encoding="ascii")
+        linked_binding = process_tree_sampler.create_browser_shared_memory(account)
         try:
-            assert process_tree_sampler.scan_session(root_pid, include_pss=False) == []
+            nested = linked_binding.directory / "nested"
+            nested.mkdir()
+            (nested / "state.bin").write_bytes(b"state")
+            os.symlink(victim, linked_binding.directory / "victim-link", target_is_directory=True)
+            captured_incomplete(
+                "BROWSER_SHARED_MEMORY_UNSAFE",
+                lambda: process_tree_sampler.cleanup_browser_shared_memory(linked_binding),
+            )
+            process_tree_sampler.force_cleanup_browser_shared_memory(linked_binding)
+            assert_browser_shared_memory_removed(linked_binding)
+            assert victim_file.read_text(encoding="ascii") == "fixture"
         finally:
-            process_tree_sampler.PROC = original_proc
+            emergency_remove_live_browser_binding(linked_binding)
 
+    for swap_after_open in (False, True):
+        with tempfile.TemporaryDirectory(dir=process_tree_sampler.BROWSER_SHARED_MEMORY_ROOT) as victim_raw:
+            victim = Path(victim_raw).resolve()
+            victim_file = victim / "must-survive.txt"
+            victim_file.write_text("fixture", encoding="ascii")
+            raced_binding = process_tree_sampler.create_browser_shared_memory(account)
+            nested = raced_binding.directory / "nested"
+            moved_nested = raced_binding.directory / "moved-nested"
+            nested.mkdir()
+            (nested / "state.bin").write_bytes(b"state")
+            real_open = process_tree_sampler.os.open
+            swapped = False
 
-def unsupported_platform_proof() -> None:
-    parser = argparse.ArgumentParser(prog="process_tree_sampler")
-    error = io.StringIO()
-    with contextlib.redirect_stderr(error):
+            def race_nested_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal swapped
+                if path != "nested" or dir_fd is None or swapped:
+                    return real_open(path, flags, mode, dir_fd=dir_fd)
+                if swap_after_open:
+                    descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+                os.rename("nested", "moved-nested", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.symlink(victim, "nested", dir_fd=dir_fd, target_is_directory=True)
+                swapped = True
+                return descriptor if swap_after_open else real_open(path, flags, mode, dir_fd=dir_fd)
+
+            try:
+                descriptors_before_race = len(os.listdir("/proc/self/fd"))
+                with mock.patch.object(process_tree_sampler.os, "open", side_effect=race_nested_open):
+                    captured_incomplete(
+                        "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+                        lambda: process_tree_sampler.force_cleanup_browser_shared_memory(raced_binding),
+                    )
+                assert len(os.listdir("/proc/self/fd")) == descriptors_before_race
+                assert swapped
+                assert nested.is_symlink()
+                assert moved_nested.is_dir()
+                assert victim_file.read_text(encoding="ascii") == "fixture"
+                nested.unlink()
+                moved_nested.rename(nested)
+                process_tree_sampler.force_cleanup_browser_shared_memory(raced_binding)
+                assert_browser_shared_memory_removed(raced_binding)
+                assert victim_file.read_text(encoding="ascii") == "fixture"
+            finally:
+                emergency_remove_live_browser_binding(raced_binding)
+
+    engine_temporary_root = os.environ.get("PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT")
+    assert engine_temporary_root
+    with tempfile.TemporaryDirectory(dir=engine_temporary_root) as raw:
+        wrong_backing = Path(raw).resolve()
+        wrong_backing.chmod(0o1777)
+        assert process_tree_sampler.mountinfo_filesystem_type(wrong_backing) != "tmpfs"
+        captured_incomplete(
+            "BROWSER_SHARED_MEMORY_BACKING_UNSAFE",
+            lambda: process_tree_sampler.create_browser_shared_memory(
+                account,
+                root=wrong_backing,
+            ),
+        )
+        assert list(wrong_backing.iterdir()) == []
+
+    with tempfile.TemporaryDirectory(dir=process_tree_sampler.BROWSER_SHARED_MEMORY_ROOT) as victim_raw:
+        victim = Path(victim_raw).resolve()
+        victim_file = victim / "must-survive.txt"
+        victim_file.write_text("fixture", encoding="ascii")
+        replaced_binding = process_tree_sampler.create_browser_shared_memory(account)
+        moved_original = replaced_binding.container / "moved-original"
         try:
-            process_tree_sampler.require_linux(parser, "win32")
-        except SystemExit as exit_error:
-            assert exit_error.code == 2
+            for index in range(70):
+                (replaced_binding.directory / f"{index:03d}-{'x' * 180}").write_bytes(b"residue")
+            replaced_binding.directory.rename(moved_original)
+            os.symlink(victim, replaced_binding.directory, target_is_directory=True)
+            captured_incomplete(
+                "BROWSER_SHARED_MEMORY_REPLACED",
+                lambda: process_tree_sampler.cleanup_browser_shared_memory(replaced_binding),
+            )
+            original_failure = process_tree_sampler.incomplete("FIXTURE_ORIGINAL_FAILURE", "x" * 4096)
+            cleanup_failure = captured_incomplete(
+                "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+                lambda: process_tree_sampler.cleanup_failed_browser_shared_memory(
+                    replaced_binding,
+                    original_failure,
+                ),
+            )
+            diagnostic = json.loads(str(cleanup_failure).split("diagnostic=", 1)[1])
+            assert diagnostic["cleanup"]["code"] == "BROWSER_SHARED_MEMORY_REPLACED"
+            assert diagnostic["original_failure"]["code"] == "FIXTURE_ORIGINAL_FAILURE"
+            assert len(diagnostic["original_failure"]["message"]) == 2048
+            assert diagnostic["original_failure"]["message"].endswith("...")
+            directory_edge = diagnostic["residue"]["directory_edge"]
+            assert directory_edge["state"] == "present"
+            assert directory_edge["kind"] == "symlink"
+            assert not directory_edge["matches_expected_identity"]
+            directory_residue = diagnostic["residue"]["directory"]
+            assert directory_residue["entries_examined"] == 64
+            assert len(directory_residue["entries"]) == 8
+            assert directory_residue["scan_truncated"] is True
+            assert all(len(entry["name"]) <= 120 for entry in directory_residue["entries"])
+            assert len(str(cleanup_failure)) < 10_000
+            assert replaced_binding.root_fd == replaced_binding.container_fd == replaced_binding.directory_fd == -1
+            assert replaced_binding.directory.is_symlink()
+            assert moved_original.is_dir()
+            assert victim_file.read_text(encoding="ascii") == "fixture"
+        finally:
+            emergency_remove_live_browser_binding(replaced_binding)
+
+
+def live_cgroup_proofs() -> dict:
+    assert os.environ.get("PLIEGO_BENCHMARK_CGROUP_PARENT"), "live proof requires delegated parent"
+    account = process_tree_sampler.resolve_engine_account()
+    live_browser_shared_memory_negative_proofs(account)
+    with workload_engine() as engine:
+        proof = sampled(workload_command(engine))
+    with workload_engine(["--workload-dirty-cache"]) as engine:
+        reclaimed = sampled(
+            workload_command(engine),
+            expected_linked_temporary_file=DIRTY_CACHE_FILENAME,
+        )
+    reclaim = reclaimed["accounting_settle"]["reclaim"]
+    assert reclaim["triggered"] is True, reclaim
+    assert reclaim["requested_bytes"] > 0
+    assert reclaim["requested_bytes"] == reclaim["before"]["memory_current_bytes"]
+    assert reclaim["write_result"] in {"success", "under-reclaimed"}
+    assert reclaim["before"]["memory_file_dirty_bytes"] > 0 or reclaim["before"]["memory_file_writeback_bytes"] > 0
+    assert_exact_counters(reclaimed)
+    assert_validator_accepts(reclaimed, True)
+    parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
+    with workload_engine(["--workload-migration-attack", parent]) as engine:
+        attacked = sampled(workload_command(engine))
+        assert attacked["exit_code"] == 0, attacked
+        assert attacked["counters"]["final"]["pids_peak"] >= 3
+        assert set(attacked["launch_security"]["migration_write_probes"]["parent"].values()) <= {
+            "EACCES",
+            "EPERM",
+        }
+    with workload_engine(["--workload-output"]) as engine:
+        captured = sampled(workload_command(engine))
+    with workload_engine(["--workload-browser-shared-memory"], browser_target=True) as engine:
+        browser = sampled([engine], browser_target=True)
+    shared_memory_before_failure = {
+        path.name
+        for path in process_tree_sampler.BROWSER_SHARED_MEMORY_ROOT.glob(
+            f"{process_tree_sampler.BROWSER_SHARED_MEMORY_CONTAINER_PREFIX}*"
+        )
+    }
+    with workload_engine(["--workload-browser-shared-memory-residue"], browser_target=True) as engine:
+        failed_browser = sampled(
+            [engine],
+            browser_target=True,
+            expected_failure_code="BROWSER_SHARED_MEMORY_NOT_EMPTY",
+        )
+    shared_memory_after_failure = {
+        path.name
+        for path in process_tree_sampler.BROWSER_SHARED_MEMORY_ROOT.glob(
+            f"{process_tree_sampler.BROWSER_SHARED_MEMORY_CONTAINER_PREFIX}*"
+        )
+    }
+    assert shared_memory_after_failure == shared_memory_before_failure
+    assert "BROWSER_SHARED_MEMORY_CLEANUP_FAILED" not in failed_browser["stderr"]
+    assert captured["launch_security"]["output_capture"]["post"]["streams"]["stdout"]["size_bytes"] == len(
+        b"fixture stdout\n"
+    )
+    assert captured["launch_security"]["output_capture"]["post"]["streams"]["stderr"]["size_bytes"] == len(
+        b"fixture stderr\n"
+    )
+    browser_storage = browser["launch_security"]["temporary_storage"]["browser_shared_memory"]
+    assert browser_storage["contract"] == process_tree_sampler.BROWSER_SHARED_MEMORY_CONTRACT
+    assert browser_storage["filesystem"] == "tmpfs"
+    assert browser_storage["semantics"] == process_tree_sampler.BROWSER_SHARED_MEMORY_SEMANTICS
+    assert browser_storage["pre"] == browser_storage["post"]
+    assert browser_storage["pre"]["root"] == browser["launch_security"]["output_capture"]["pre"]["root"]
+    assert browser_storage["pre"]["container_entries"] == [process_tree_sampler.BROWSER_SHARED_MEMORY_DIRECTORY]
+    assert browser_storage["pre"]["directory_entries"] == []
+    assert browser_storage["pre"]["container"]["mode"] == 0o711
+    assert browser_storage["pre"]["container"]["link_count"] == 3
+    assert browser_storage["pre"]["directory"]["owner_uid"] == account.uid
+    assert browser_storage["pre"]["directory"]["owner_gid"] == account.gid
+    assert browser_storage["pre"]["directory"]["mode"] == 0o700
+    assert browser_storage["pre"]["directory"]["link_count"] == 2
+    assert browser["launch_security"]["launch_context"]["browser_tmpdir"] == browser_storage["pre"]["directory"]["path"]
+    assert browser["launch_security"]["launch_context"]["tmpdir"] != browser_storage["pre"]["directory"]["path"]
+    assert not Path(browser_storage["pre"]["container"]["path"]).exists()
+    assert_validator_accepts(browser, True)
+    assert proof["method"] == "linux-cgroup-v2-v1"
+    assert proof["scope"] == "fresh-root-owned-cgroup-subtree"
+    launch = proof["launch_security"]
+    assert launch["launch_context"]["browser_tmpdir"] is None
+    assert launch["temporary_storage"]["browser_shared_memory"] is None
+    assert launch["account"] == process_tree_sampler.ENGINE_ACCOUNT
+    assert launch["uid"] == account.uid and launch["gid"] == account.gid
+    assert launch["status"]["uid"] == [account.uid] * 4
+    assert launch["status"]["gid"] == [account.gid] * 4
+    assert launch["status"]["supplementary_groups"] == []
+    assert all(
+        int(launch["status"][field], 16) == 0
+        for field in (
+            "cap_inheritable_hex",
+            "cap_permitted_hex",
+            "cap_effective_hex",
+            "cap_bounding_hex",
+            "cap_ambient_hex",
+        )
+    )
+    assert launch["status"]["no_new_privs"] == 1
+    output_capture = launch["output_capture"]
+    assert output_capture["contract"] == process_tree_sampler.ENGINE_OUTPUT_CAPTURE_CONTRACT
+    assert output_capture["filesystem"] == "tmpfs"
+    assert output_capture["max_bytes_per_stream"] == process_tree_sampler.ENGINE_OUTPUT_CAPTURE_MAX_BYTES
+    assert output_capture["write_sync"] == "O_SYNC"
+    assert output_capture["pre"]["root"] == output_capture["post"]["root"]
+    assert output_capture["pre"]["root"]["path"] == str(process_tree_sampler.ENGINE_OUTPUT_CAPTURE_ROOT)
+    assert output_capture["pre"]["root"]["mode"] == 0o1777
+    output_streams = output_capture["pre"]["streams"]
+    output_streams_after = output_capture["post"]["streams"]
+    assert {binding["mode"] for binding in output_streams.values()} == {0o600}
+    assert {binding["owner_uid"] for binding in output_streams.values()} == {0}
+    assert {binding["link_count"] for binding in output_streams.values()} == {1}
+    assert {binding["size_bytes"] for binding in output_streams.values()} == {0}
+    assert all(
+        0 <= binding["size_bytes"] <= process_tree_sampler.ENGINE_OUTPUT_CAPTURE_MAX_BYTES
+        for binding in output_streams_after.values()
+    )
+    for label in ("stdout", "stderr"):
+        assert {key: value for key, value in output_streams[label].items() if key != "size_bytes"} == {
+            key: value for key, value in output_streams_after[label].items() if key != "size_bytes"
+        }
+    assert (
+        len({(binding["identity"]["device"], binding["identity"]["inode"]) for binding in output_streams.values()}) == 2
+    )
+    assert proof["cgroup_drained"] is True
+    assert proof["cleanup"]["kill_used"] is False
+    assert proof["counters"]["final"]["pids_peak"] >= 3
+    assert proof["memory_peak_bytes"] >= 48 * 1024 * 1024
+    observed = proof["sampled_diagnostics"]["observed_processes"]
+    assert len(observed) >= 3, observed
+    assert any(row["pid"] == proof["root_pid"] and row["start_ticks"] == proof["root_start_ticks"] for row in observed)
+    assert proof["sampled_diagnostics"]["sampled_peak_summed_rss_kib_lower_bound"] > 48 * 1024
+    assert "lower bounds" in proof["sampled_diagnostics"]["coverage"]
+    assert_exact_counters(proof)
+    assert_validator_accepts(proof, True)
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        os.chown(directory, account.uid, account.gid)
+        directory.chmod(0o700)
+        pid_path = directory / "leaked.pid"
+        with workload_engine(["--workload-leak", str(pid_path)]) as engine:
+            cleaned = sampled(
+                workload_command(engine),
+                descendant_grace_ms=50,
+            )
+        leaked_pid = int(pid_path.read_text(encoding="ascii"))
+        assert cleaned["cleanup"]["kill_used"] is True
+        assert any(row["pid"] == leaked_pid for row in cleaned["cleanup"]["lingering_before_kill"])
+        try:
+            os.kill(leaked_pid, 0)
+        except ProcessLookupError:
+            pass
         else:
-            raise AssertionError("unsupported platform was accepted")
-    assert "this sampler requires Linux procfs" in error.getvalue()
+            raw_stat = (Path("/proc") / str(leaked_pid) / "stat").read_text(encoding="ascii")
+            state = raw_stat[raw_stat.rfind(")") + 2 :].split()[0]
+            assert state == "Z", f"cgroup.kill left PID {leaked_pid} alive in state {state}"
+        assert_exact_counters(cleaned)
+        assert_validator_accepts(cleaned, False)
+    return proof
+
+
+def php_integration_proof() -> None:
+    php = shutil.which("php")
+    assert php is not None, "Linux PHP is required for the PHP-to-Python integration gate"
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        directory.chmod(0o755)
+        input_path = directory / "input.html"
+        output_path = directory / "output.pdf"
+        artifacts_path = directory / "ignored-artifacts"
+        engine = directory / "fake-engine.py"
+        input_bytes = b"<p>fixture</p>"
+        input_path.write_bytes(input_bytes)
+        input_sha256 = hashlib.sha256(input_bytes).hexdigest()
+        bundle = hashlib.sha256()
+        bundle.update(b"input.html\0" + bytes.fromhex(input_sha256))
+        delivery_fixture = Path(__file__).resolve().parents[2] / "contracts" / "api2" / "fixtures" / "delivery"
+        pdf_base64 = base64.b64encode((delivery_fixture / "document.pdf").read_bytes()).decode("ascii")
+        scene_base64 = base64.b64encode((delivery_fixture / "scene.json").read_bytes()).decode("ascii")
+        bundle_base64 = base64.b64encode((delivery_fixture / "bundle.json").read_bytes()).decode("ascii")
+        engine.write_text(
+            f"""#!/usr/bin/python3 -B
+import base64, hashlib, json, os, pathlib, sys
+
+
+def write_synced(path, payload):
+    with path.open('wb') as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def sync_directory(path):
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+assert sys.argv[1:] == ['render-api2']
+request_bytes = sys.stdin.buffer.read()
+request = json.loads(request_bytes)
+assert request_bytes == (json.dumps(request, separators=(',', ':')) + '\\n').encode()
+assert request['api'] == 2
+root = pathlib.Path.cwd()
+temporary = pathlib.Path(os.environ['TMPDIR'])
+assert temporary.is_dir()
+assert root.name == 'job'
+assert temporary.name == 'temporary'
+assert root.parent == temporary.parent
+assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
+manifest_bytes = (root / 'input-manifest.json').read_bytes()
+manifest_descriptor = request['input']['manifest']
+assert manifest_descriptor['bytes'] == len(manifest_bytes)
+assert manifest_descriptor['sha256'] == 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest()
+manifest = json.loads(manifest_bytes)
+assert manifest['entries'][0]['path'] == 'input.html'
+assert manifest['entries'][0]['sha256'] == 'sha256:' + hashlib.sha256((root / 'input/input.html').read_bytes()).hexdigest()
+delivery = root / 'delivery'
+delivery.mkdir()
+diagnostics = pathlib.Path.cwd() / 'diagnostics'
+diagnostics.mkdir()
+pdf = base64.b64decode({pdf_base64!r})
+scene = base64.b64decode({scene_base64!r})
+bundle = base64.b64decode({bundle_base64!r})
+environment = b'{{"fixture":true}}\\n'
+write_synced(delivery / 'document.pdf', pdf)
+write_synced(delivery / 'scene.json', scene)
+write_synced(delivery / 'bundle.json', bundle)
+write_synced(diagnostics / 'environment.json', environment)
+sync_directory(delivery)
+sync_directory(diagnostics)
+sync_directory(root)
+result = {{
+    'schema': 'pliego.render-result',
+    'version': 1,
+    'api': 2,
+    'status': 'success',
+    'request': request,
+    'engine': {{
+        'name': 'pliego',
+        'version': '0.0.0-test',
+        'api': 2,
+        'source_commit': '0' * 40,
+        'runtime': {{
+            'mode': 'one-shot',
+            'target': 'x86_64-unknown-linux-gnu',
+            'binary_sha256': 'sha256:' + hashlib.sha256(pathlib.Path(sys.argv[0]).read_bytes()).hexdigest(),
+            'servo_base': '1' * 40,
+        }},
+    }},
+    'delivery': {{
+        'pdf': {{
+            'path': 'document.pdf',
+            'media_type': 'application/pdf',
+            'sha256': 'sha256:' + hashlib.sha256(pdf).hexdigest(),
+            'bytes': len(pdf),
+        }},
+        'scene': {{
+            'path': 'scene.json',
+            'media_type': 'application/vnd.pliego.document-scene+json',
+            'sha256': 'sha256:' + hashlib.sha256(scene).hexdigest(),
+            'bytes': len(scene),
+        }},
+        'bundle': {{
+            'path': 'bundle.json',
+            'media_type': 'application/vnd.pliego.bundle-manifest+json',
+            'sha256': 'sha256:' + hashlib.sha256(bundle).hexdigest(),
+            'bytes': len(bundle),
+        }},
+    }},
+    'conformance': {{'requested': None, 'status': 'not-requested', 'evidence': None}},
+    'diagnostics': {{'retained': True, 'artifacts': [{{
+        'path': 'diagnostics/environment.json',
+        'media_type': 'application/json',
+        'sha256': 'sha256:' + hashlib.sha256(environment).hexdigest(),
+        'bytes': len(environment),
+    }}]}},
+    'error': None,
+}}
+print(json.dumps(result, separators=(',', ':')))
+sys.stdout.flush()
+os.fsync(sys.stdout.fileno())
+""",
+            encoding="utf-8",
+        )
+        engine.chmod(0o755)
+        run = subprocess.run(
+            [
+                php,
+                str(PHP_RUNNER),
+                "--binary",
+                str(engine),
+                "--native-api2",
+                "--input",
+                input_path.name,
+                "--output",
+                str(output_path),
+                "--artifacts",
+                str(artifacts_path),
+                "--samples",
+                "1",
+                "--warmup",
+                "0",
+                "--cwd",
+                str(directory),
+                "--fixture-input-sha256",
+                input_sha256,
+                "--fixture-bundle-sha256",
+                bundle.hexdigest(),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert run.returncode == 0, run.stderr
+        sample = json.loads(run.stdout)
+        assert sample["ok"] is True
+        assert sample["correctness"]["pass"] is True
+        checks = {check["name"]: check["status"] for check in sample["correctness"]["checks"]}
+        assert checks["api2_request_echo"] == "pass"
+        assert checks["api2_pdf_descriptor"] == "pass"
+        assert checks["api2_scene_descriptor"] == "pass"
+        assert checks["api2_bundle_descriptor"] == "pass"
+        assert checks["api2_diagnostics_bound"] == "pass"
+        assert sample["measurement_method"] == "linux-cgroup-v2-v1"
+        assert sample["resource_usage"]["root_start_ticks"] > 0
+        assert sample["resource_usage"]["cgroup_drained"] is True
+        assert sample["resource_usage"]["launch_security"]["argv"] == [str(engine.resolve()), "render-api2"]
+        output_capture = sample["resource_usage"]["launch_security"]["output_capture"]
+        assert output_capture["contract"] == process_tree_sampler.ENGINE_OUTPUT_CAPTURE_CONTRACT
+        assert output_capture["pre"]["root"] == output_capture["post"]["root"]
+        assert output_capture["pre"]["root"]["path"] == str(process_tree_sampler.ENGINE_OUTPUT_CAPTURE_ROOT)
+        assert output_capture["post"]["streams"]["stdout"]["size_bytes"] > 0
+        native_storage = sample["resource_usage"]["launch_security"]["temporary_storage"]["native_api2_path_bindings"]
+        assert native_storage["pre"] == native_storage["post"]
+        bindings = native_storage["pre"]["bindings"]
+        sandbox = Path(bindings["sandbox"]["path"])
+        assert Path(bindings["job"]["path"]) == sandbox / "job"
+        assert Path(bindings["temporary"]["path"]) == sandbox / "temporary"
+        assert (
+            len({(binding["identity"]["device"], binding["identity"]["inode"]) for binding in bindings.values()}) == 4
+        )
+        assert sample["memory_peak_bytes"] == sample["resource_usage"]["memory_peak_bytes"]
+        violations: list[validate_result.Violation] = []
+        validate_result.validate_resource_usage(sample, "$.sample", violations)
+        assert not violations, "\n".join(map(str, violations))
 
 
 def acceptance_overhead_proof() -> tuple[dict, dict]:
-    acceptance_duration_seconds = 1.5
-    acceptance_command = workload_command(duration=acceptance_duration_seconds)
     pair_count = 20
     seed = 20260808
     rng = random.Random(seed)
     pairs: list[dict] = []
-    direct_wall_ms(acceptance_command)
-    sampled(acceptance_command)
-    for index in range(pair_count):
-        order = ["direct", "sampled"]
-        rng.shuffle(order)
-        direct_ms = 0.0
-        measurement: dict = {}
-        for mode in order:
-            if mode == "direct":
-                direct_ms = direct_wall_ms(acceptance_command)
-            else:
-                measurement = sampled(acceptance_command)
-        sampled_ms = float(measurement["wall_ms"])
-        pairs.append(
-            {
-                "index": index,
-                "order": order,
-                "direct_wall_ms": direct_ms,
-                "sampled_wall_ms": sampled_ms,
-                "overhead_percent": (sampled_ms - direct_ms) * 100.0 / direct_ms,
-                "sampler_cpu_percent_of_wall": float(measurement["sampler_cpu_percent_of_wall"]),
-            }
-        )
+    with workload_engine(["--workload-parent", "32", "1.5"]) as engine:
+        command = workload_command(engine)
+        direct_wall_ms(command)
+        sampled(command)
+        for index in range(pair_count):
+            order = ["direct", "sampled"]
+            rng.shuffle(order)
+            direct_ms = 0.0
+            measurement: dict = {}
+            for mode in order:
+                if mode == "direct":
+                    direct_ms = direct_wall_ms(command)
+                else:
+                    measurement = sampled(command)
+            sampled_ms = float(measurement["wall_ms"])
+            pairs.append(
+                {
+                    "index": index,
+                    "order": order,
+                    "direct_wall_ms": direct_ms,
+                    "sampled_wall_ms": sampled_ms,
+                    "overhead_percent": (sampled_ms - direct_ms) * 100.0 / direct_ms,
+                    "sampler_cpu_percent_of_wall": float(measurement["sampler_cpu_percent_of_wall"]),
+                }
+            )
     overhead = [float(pair["overhead_percent"]) for pair in pairs]
     sampler_cpu = [float(pair["sampler_cpu_percent_of_wall"]) for pair in pairs]
-    overhead_p95 = percentile(overhead, 0.95)
+    overhead_p95 = validate_result.percentile(overhead, 95)
     observer_effect = {
         "method": "randomized-paired-wall-v1",
         "seed": seed,
         "pair_count": pair_count,
-        "workload_duration_seconds": acceptance_duration_seconds,
-        "percentile_method": "linear interpolation at rank (n - 1) * 0.95",
+        "workload_duration_seconds": 1.5,
+        "percentile_method": validate_result.PERCENTILE_METHOD,
         "p95_overhead_percent": round(overhead_p95, 3),
         "threshold_percent_exclusive": 2.0,
         "passed": overhead_p95 < 2.0,
@@ -168,66 +2536,44 @@ def acceptance_overhead_proof() -> tuple[dict, dict]:
     }
     sampler_cpu_diagnostic = {
         "method": "sampler-process-cpu-divided-by-engine-wall",
-        "median_percent_of_wall": round(statistics.median(sampler_cpu), 3),
-        "p95_percent_of_wall": round(percentile(sampler_cpu, 0.95), 3),
+        "percentile_method": validate_result.PERCENTILE_METHOD,
+        "p50_percent_of_wall": round(validate_result.percentile(sampler_cpu, 50), 3),
+        "p95_percent_of_wall": round(validate_result.percentile(sampler_cpu, 95), 3),
         "raw_percent_of_wall": sampler_cpu,
     }
     return observer_effect, sampler_cpu_diagnostic
 
 
-def main(acceptance_overhead: bool) -> None:
-    recycled_root_pid_proof()
-    unsupported_platform_proof()
-    command = workload_command()
-    proof = sampled(command)
-    assert proof["exit_code"] == 0 and proof["signal"] is None
-    assert proof["tree_complete"] is True
-    assert len(proof["observed_pids"]) >= 3, proof["observed_pids"]
-    assert proof["peak_summed_rss_kib"] >= 48 * 1024, proof["peak_summed_rss_kib"]
-    assert max(len(sample["processes"]) for sample in proof["samples"]) >= 3
-    assert proof["cpu_user_ms"] > 0 and proof["cpu_sys_ms"] >= 0
-    assert proof["read_bytes"] is not None and proof["write_bytes"] > 0
-
-    signaled = sampled([sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"])
-    assert signaled["exit_code"] == 128 + signal.SIGTERM
-    assert signaled["signal"] == signal.SIGTERM
-
-    report = {
-        "proof": "parent-plus-two-memory-heavy-children",
-        "observed_pids": proof["observed_pids"],
-        "peak_summed_rss_kib": proof["peak_summed_rss_kib"],
-        "peak_summed_pss_kib": proof["peak_summed_pss_kib"],
-        "sampler_cpu_diagnostic": {
-            "method": "sampler-process-cpu-divided-by-engine-wall",
-            "functional_sample_percent_of_wall": proof["sampler_cpu_percent_of_wall"],
-        },
-    }
-    observer_effect: dict | None = None
+def main(live: bool, php_integration: bool, acceptance_overhead: bool) -> None:
+    fixture_proofs()
+    proof = live_cgroup_proofs() if live or acceptance_overhead else None
+    if php_integration:
+        php_integration_proof()
+    output: dict = {"fixture_proofs": "passed", "live": proof}
     if acceptance_overhead:
-        observer_effect, sampler_cpu_diagnostic = acceptance_overhead_proof()
-        report["observer_effect"] = observer_effect
-        report["sampler_cpu_diagnostic"] = sampler_cpu_diagnostic
-    print(
-        json.dumps(
-            report,
-            indent=2,
-        )
-    )
-    if observer_effect is not None and not observer_effect["passed"]:
-        raise AssertionError(
-            f"p95 paired observer overhead {observer_effect['p95_overhead_percent']}% is not below 2%"
-        )
+        observer_effect, sampler_cpu = acceptance_overhead_proof()
+        output["observer_effect"] = observer_effect
+        output["sampler_cpu_diagnostic"] = sampler_cpu
+        assert observer_effect["passed"], observer_effect
+    print(json.dumps(output, indent=2))
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--workload-child":
-        raise SystemExit(child_workload(int(sys.argv[2]), float(sys.argv[3])))
-    if len(sys.argv) == 4 and sys.argv[1] == "--workload-parent":
-        raise SystemExit(parent_workload(int(sys.argv[2]), float(sys.argv[3])))
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--acceptance-overhead",
-        action="store_true",
-        help="run the 20-pair p95 observer-effect gate on a dedicated Linux host",
-    )
-    main(parser.parse_args().acceptance_overhead)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--live", action="store_true")
+    parser.add_argument("--php-integration", action="store_true")
+    parser.add_argument("--acceptance-overhead", action="store_true")
+    parser.add_argument("--workload-child", nargs=2, metavar=("MEBIBYTES", "DURATION"))
+    parser.add_argument("--workload-parent", nargs=2, metavar=("MEBIBYTES", "DURATION"))
+    parser.add_argument("--workload-leak", metavar="PID_PATH")
+    parser.add_argument("--workload-migration-attack", metavar="CGROUP_PARENT")
+    args = parser.parse_args()
+    if args.workload_child:
+        raise SystemExit(child_workload(int(args.workload_child[0]), float(args.workload_child[1])))
+    if args.workload_parent:
+        raise SystemExit(parent_workload(int(args.workload_parent[0]), float(args.workload_parent[1])))
+    if args.workload_leak:
+        raise SystemExit(leaking_parent(args.workload_leak))
+    if args.workload_migration_attack:
+        raise SystemExit(migration_attack(args.workload_migration_attack))
+    main(args.live, args.php_integration, args.acceptance_overhead)

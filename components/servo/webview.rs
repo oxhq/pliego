@@ -12,14 +12,18 @@ use accesskit::{
 };
 use dpi::PhysicalSize;
 use embedder_traits::{
-    ContextMenuAction, ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlRequest, Image,
-    InputEvent, InputEventAndId, InputEventId, JSValue, JavaScriptEvaluationError, LoadStatus,
+    ContextMenuAction, ContextMenuItem, Cursor, DocumentCaptureCommit, DocumentCapturePrecondition,
+    DocumentClockConfiguration, DocumentPaintPresentationTicket, DocumentPaintPresentationTicketId,
+    DocumentTimeControlCancellationId, DocumentTimeControlCommand, DocumentTimeControlError,
+    DocumentTimeControlReceiver, EmbedderControlId, EmbedderControlRequest, Image, InputEvent,
+    InputEventAndId, InputEventId, JSValue, JavaScriptEvaluationError, LoadStatus,
     MediaSessionActionType, NewWebViewDetails, ScreenGeometry, ScreenshotCaptureError, Scroll,
     Theme, TraversalId, UrlRequest, ViewportDetails, WebViewPoint, WebViewRect,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
 use log::debug;
+use paint::{ControlledDocumentCaptureReservation, ControlledDocumentCaptureResult};
 use paint_api::WebViewTrait;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::Epoch;
@@ -114,6 +118,8 @@ pub(crate) struct WebViewInner {
 
     rendering_context: Rc<dyn RenderingContext>,
     user_content_manager: Option<Rc<UserContentManager>>,
+    document_clock: DocumentClockConfiguration,
+    next_document_time_control_cancellation_id: u64,
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     load_status: LoadStatus,
     status_text: Option<String>,
@@ -173,6 +179,8 @@ impl WebView {
             back_forward_list: Default::default(),
             back_forward_list_index: 0,
             user_content_manager: builder.user_content_manager.clone(),
+            document_clock: builder.document_clock,
+            next_document_time_control_cancellation_id: 0,
         })));
 
         let viewport_details = webview.viewport_details();
@@ -214,12 +222,19 @@ impl WebView {
                         .expect("Should always be able to parse 'about:blank'."),
                 );
 
-                servo
-                    .constellation_proxy()
-                    .send(EmbedderToConstellationMessage::NewWebView(
-                        url.into(),
-                        new_webview_details,
-                    ));
+                let message = match builder.document_clock {
+                    DocumentClockConfiguration::Realtime => {
+                        EmbedderToConstellationMessage::NewWebView(url.into(), new_webview_details)
+                    },
+                    document_clock @ DocumentClockConfiguration::Controlled { .. } => {
+                        EmbedderToConstellationMessage::NewWebViewWithDocumentClock(
+                            url.into(),
+                            new_webview_details,
+                            document_clock,
+                        )
+                    },
+                };
+                servo.constellation_proxy().send(message);
             },
         }
 
@@ -241,6 +256,7 @@ impl WebView {
         let request = CreateNewWebViewRequest {
             servo: self.inner().servo.clone(),
             responder: IpcResponder::new(response_sender, None),
+            document_clock: self.inner().document_clock,
         };
         self.delegate().request_create_new(self.clone(), request);
     }
@@ -756,6 +772,60 @@ impl WebView {
         self.inner().servo.paint().render(self.id());
     }
 
+    /// Reserve the exact currently presented Paint generation for a qualified Script candidate.
+    ///
+    /// This owner-thread deterministic-rendering seam synchronously renders but deliberately does
+    /// not read pixels. The returned ticket is retained by Paint and is single-use.
+    #[doc(hidden)]
+    pub fn reserve_controlled_document_capture(
+        &self,
+        precondition: &DocumentCapturePrecondition,
+    ) -> ControlledDocumentCaptureResult<ControlledDocumentCaptureReservation> {
+        self.inner()
+            .servo
+            .paint()
+            .reserve_controlled_document_capture(self.id(), precondition)
+    }
+
+    /// Consume an exact retained Paint ticket after Script atomically commits the same candidate.
+    /// Pixel readback occurs only after every ticket, commit, Paint, and WebRender dimension still
+    /// matches exactly. Every finalization attempt consumes the retained ticket.
+    #[doc(hidden)]
+    pub fn finalize_controlled_document_capture(
+        &self,
+        ticket: &DocumentPaintPresentationTicket,
+        commit: &DocumentCaptureCommit,
+    ) -> ControlledDocumentCaptureResult<RgbaImage> {
+        self.inner()
+            .servo
+            .paint()
+            .finalize_controlled_document_capture(self.id(), ticket, commit)
+    }
+
+    /// Idempotently discard a retained Paint ticket. Returns whether this call removed it.
+    #[doc(hidden)]
+    pub fn abort_controlled_document_capture(
+        &self,
+        ticket_id: DocumentPaintPresentationTicketId,
+    ) -> bool {
+        self.inner()
+            .servo
+            .paint()
+            .abort_controlled_document_capture(self.id(), ticket_id)
+    }
+
+    /// Idempotently discard the retained Paint ticket owned by this WebView, if any.
+    ///
+    /// This scoped recovery seam remains usable when a low-level caller lost the opaque ticket
+    /// value. It cannot discard a reservation owned by a sibling WebView sharing the framebuffer.
+    #[doc(hidden)]
+    pub fn abort_current_controlled_document_capture(&self) -> bool {
+        self.inner()
+            .servo
+            .paint()
+            .abort_current_controlled_document_capture(self.id())
+    }
+
     /// Get the [`UserContentManager`] associated with this [`WebView`].
     pub fn user_content_manager(&self) -> Option<Rc<UserContentManager>> {
         self.inner().user_content_manager.clone()
@@ -785,6 +855,73 @@ impl WebView {
         receiver
             .try_recv_timeout(Duration::from_secs(5))
             .unwrap_or(None)
+    }
+
+    /// Submit one internal mechanical command to an opt-in controlled ScriptThread.
+    ///
+    /// The returned receiver consumes itself after one bounded wait and preserves timeout,
+    /// disconnect, decoding, and I/O failures distinctly. Timeout, transport failure, or dropping
+    /// the receiver sends an exact correlated abandonment so the WebView cannot remain permanently
+    /// occupied. A missing `Observe` response cannot hide page work or clock advance,
+    /// though internal control bookkeeping may have changed. A missing `DriveOneTurn` response may
+    /// have completed late and must not be retried as a no-op. A guarded failure remains
+    /// exact-token indeterminate. A missing `ConsumeCapture` response is candidate-and-ticket
+    /// indeterminate and must abort the whole capture transaction without retry. This API neither
+    /// decides visual settlement nor captures output by itself.
+    #[doc(hidden)]
+    pub fn request_controlled_document_time(
+        &self,
+        command: DocumentTimeControlCommand,
+    ) -> Result<DocumentTimeControlReceiver, DocumentTimeControlError> {
+        self.request_controlled_document_time_notifying(command, || {})
+    }
+
+    /// Submit one controlled command and notify the embedding driver only after its result has
+    /// entered the returned receiver or that receiver has disconnected.
+    #[doc(hidden)]
+    pub fn request_controlled_document_time_notifying<F>(
+        &self,
+        command: DocumentTimeControlCommand,
+        notify: F,
+    ) -> Result<DocumentTimeControlReceiver, DocumentTimeControlError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let (response, receiver) = GenericCallback::new_blocking_notifying(notify)
+            .map_err(|_| DocumentTimeControlError::ChannelClosed)?;
+        let (webview_id, cancellation_id, constellation_proxy) = {
+            let mut inner = self.inner_mut();
+            let Some(next_id) = inner
+                .next_document_time_control_cancellation_id
+                .checked_add(1)
+            else {
+                return Err(DocumentTimeControlError::CancellationSequenceOverflow);
+            };
+            let cancellation_id = DocumentTimeControlCancellationId::new(
+                inner.next_document_time_control_cancellation_id,
+            );
+            inner.next_document_time_control_cancellation_id = next_id;
+            (
+                inner.id,
+                cancellation_id,
+                inner.servo.constellation_proxy().clone(),
+            )
+        };
+        let cancellation_proxy = constellation_proxy.clone();
+        let receiver =
+            DocumentTimeControlReceiver::new_cancellable(receiver, &command, move || {
+                cancellation_proxy.send(EmbedderToConstellationMessage::CancelDocumentTimeControl(
+                    webview_id,
+                    cancellation_id,
+                ));
+            });
+        constellation_proxy.send(EmbedderToConstellationMessage::ControlDocumentTime(
+            webview_id,
+            cancellation_id,
+            command,
+            response,
+        ));
+        Ok(receiver)
     }
 
     /// Asynchronously take a screenshot of the [`WebView`] contents, given a `rect` or the whole
@@ -1045,6 +1182,8 @@ pub struct WebViewBuilder {
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     create_new_webview_responder: Option<IpcResponder<Option<NewWebViewDetails>>>,
     user_content_manager: Option<Rc<UserContentManager>>,
+    document_clock: DocumentClockConfiguration,
+    document_clock_is_inherited: bool,
     clipboard_delegate: Option<Rc<dyn ClipboardDelegate>>,
     #[cfg(feature = "gamepad")]
     gamepad_delegate: Option<Rc<dyn GamepadDelegate>>,
@@ -1064,6 +1203,8 @@ impl WebViewBuilder {
             delegate: Rc::new(DefaultWebViewDelegate),
             create_new_webview_responder: None,
             user_content_manager: None,
+            document_clock: DocumentClockConfiguration::Realtime,
+            document_clock_is_inherited: false,
             clipboard_delegate: None,
             #[cfg(feature = "gamepad")]
             gamepad_delegate: None,
@@ -1074,9 +1215,12 @@ impl WebViewBuilder {
         servo: &Servo,
         rendering_context: Rc<dyn RenderingContext>,
         responder: IpcResponder<Option<NewWebViewDetails>>,
+        document_clock: DocumentClockConfiguration,
     ) -> Self {
         let mut builder = Self::new(servo, rendering_context);
         builder.create_new_webview_responder = Some(responder);
+        builder.document_clock = document_clock;
+        builder.document_clock_is_inherited = true;
         builder
     }
 
@@ -1107,6 +1251,19 @@ impl WebViewBuilder {
     /// to the `UserContentManager` will take effect only after the document is reloaded.
     pub fn user_content_manager(mut self, user_content_manager: Rc<UserContentManager>) -> Self {
         self.user_content_manager = Some(user_content_manager);
+        self
+    }
+
+    /// Install a document-observable clock before the WebView's initial navigation is sent.
+    ///
+    /// This is an internal deterministic-rendering seam. Interactive WebViews retain the realtime
+    /// default. Controlled mode is useful only together with the matching typed event-loop driver.
+    /// Auxiliary WebViews inherit their opener's authority and cannot override it here.
+    #[doc(hidden)]
+    pub fn document_clock(mut self, document_clock: DocumentClockConfiguration) -> Self {
+        if !self.document_clock_is_inherited {
+            self.document_clock = document_clock;
+        }
         self
     }
 

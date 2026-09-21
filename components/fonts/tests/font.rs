@@ -74,6 +74,40 @@ fn exposes_exact_font_resource_bytes_and_face_parameters() {
     assert!(!resource.synthetic_bold);
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_metrics_accept_cap_height_above_ascent() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/wpt/tests/css/WOFF2/support/valid-005.woff2");
+    let compressed = std::fs::read(&path).unwrap();
+    let bytes = fontsan::process(&compressed).unwrap();
+    let data = FontData::from_bytes(&bytes);
+    let identifier = FontIdentifier::Web(ServoUrl::from_file_path(path).unwrap());
+    let font = PlatformFont::new_from_data(identifier, &data, None, &[], false).unwrap();
+
+    assert_eq!(font.metrics().leading, Au::from_px(0));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_metrics_preserve_non_zero_line_gap() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuMathTeXGyre.ttf");
+    let data = FontData::from_bytes(&std::fs::read(&path).unwrap());
+    let identifier = FontIdentifier::Web(ServoUrl::from_file_path(path).unwrap());
+    let metrics = PlatformFont::new_from_data(identifier, &data, None, &[], false)
+        .unwrap()
+        .metrics();
+
+    assert_eq!(metrics.leading, Au::from_f32_px(3.2));
+    assert_eq!(metrics.line_gap, Au::from_f32_px(19.2));
+    assert_eq!(
+        metrics.line_gap,
+        metrics.ascent + metrics.descent + metrics.leading
+    );
+}
+
 #[test]
 fn test_font_can_do_fast_shaping() {
     let dejavu_sans = make_font(

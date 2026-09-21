@@ -1,0 +1,164 @@
+{
+  "archive_format": {
+    "container": "tar.gz",
+    "contract": "pliego.canonical-tar-gzip.v1",
+    "directory_mode": "0755",
+    "file_mode": "0644",
+    "gid": 0,
+    "gzip_compression_level": 9,
+    "mtime": 0,
+    "tar_format": "ustar",
+    "uid": 0
+  },
+  "claim_boundary": "Three correctness-gated repeats on GitHub-hosted VMs; repeat-to-repeat spread is retained, no best or canonical repeat is selected, and the series is not dedicated-host evidence or a general production-performance ranking.",
+  "evidence_class": "github-hosted-exploratory",
+  "files": [
+    {
+      "bytes": 351,
+      "path": "repeats/repeat-1/SHA256SUMS",
+      "sha256": "b832fe829a9d58659580b0d4f919d6487cf596db28766827337a10d515cfede8"
+    },
+    {
+      "bytes": 8996,
+      "path": "repeats/repeat-1/all-metrics.md",
+      "sha256": "02148a63d6e4f8f8a14fc65033e1441e6a036a48cf58774bf0cb68f7284635a0"
+    },
+    {
+      "bytes": 426877,
+      "path": "repeats/repeat-1/hosted-comparison.v1.json",
+      "sha256": "61a111d5081f8a5754a3e26fdd6e4d37be998de5995471c33cd065c87844ba99"
+    },
+    {
+      "bytes": 10413473,
+      "path": "repeats/repeat-1/interleaved-run.v1.json",
+      "sha256": "79d8e98f7c985d6a846465ddc5a789a238b29afcec596b50fe0ee3da1265d746"
+    },
+    {
+      "bytes": 944,
+      "path": "repeats/repeat-1/verified-release.json",
+      "sha256": "03b981fc47e62457f7c2420fb4923fdcc1dfbee2baa1572fe3c4b9fa1d2b487e"
+    },
+    {
+      "bytes": 351,
+      "path": "repeats/repeat-2/SHA256SUMS",
+      "sha256": "cbeb81190d9016187a34a52dee3ca2b3d096cc41748aeed2df1579772ff2fb27"
+    },
+    {
+      "bytes": 8973,
+      "path": "repeats/repeat-2/all-metrics.md",
+      "sha256": "bb51eab2d1f9d3187c9dc7c3176ac0204c8d8173727e1d390cc277392a4bd0a1"
+    },
+    {
+      "bytes": 426907,
+      "path": "repeats/repeat-2/hosted-comparison.v1.json",
+      "sha256": "3b1427c92eec4ebd6d7e10a323e3d66ae94cd612a98b84879cc89666c63d1c66"
+    },
+    {
+      "bytes": 9946606,
+      "path": "repeats/repeat-2/interleaved-run.v1.json",
+      "sha256": "6fd2b2ada831ed71130d0c413b50b299ca92f0838471451eab7bf5f18e5d1f3e"
+    },
+    {
+      "bytes": 944,
+      "path": "repeats/repeat-2/verified-release.json",
+      "sha256": "03b981fc47e62457f7c2420fb4923fdcc1dfbee2baa1572fe3c4b9fa1d2b487e"
+    },
+    {
+      "bytes": 351,
+      "path": "repeats/repeat-3/SHA256SUMS",
+      "sha256": "6e8dec7ce6199b6581fbe4427a2082780344ce817fe128b19284238617b55e9e"
+    },
+    {
+      "bytes": 8993,
+      "path": "repeats/repeat-3/all-metrics.md",
+      "sha256": "31f7f40fa803c03acd7ea40c763cb7b6c075c056b2aef9d67d622dd1aa04887d"
+    },
+    {
+      "bytes": 427097,
+      "path": "repeats/repeat-3/hosted-comparison.v1.json",
+      "sha256": "d52d77cf062dffc082d08b6254a0c29083920feefcf50fa1053e491ba5fbe8bc"
+    },
+    {
+      "bytes": 10212235,
+      "path": "repeats/repeat-3/interleaved-run.v1.json",
+      "sha256": "065fb4ec8a1b5872e675670c53981e7cfae2eb4acad2b3c8f9f75879bc308e73"
+    },
+    {
+      "bytes": 944,
+      "path": "repeats/repeat-3/verified-release.json",
+      "sha256": "03b981fc47e62457f7c2420fb4923fdcc1dfbee2baa1572fe3c4b9fa1d2b487e"
+    },
+    {
+      "bytes": 169,
+      "path": "series/SHA256SUMS",
+      "sha256": "e55056a440d9c359442b74fbecf1255efaf477fdbb017ca2967e641aaf7a293a"
+    },
+    {
+      "bytes": 9849,
+      "path": "series/all-repeats.md",
+      "sha256": "b6f266a43641645044fd16dcc923059af3ee5b2f76c1c622722ea9b530bb54e6"
+    },
+    {
+      "bytes": 67970,
+      "path": "series/hosted-series.v1.json",
+      "sha256": "868c5d8cdb08dbebaacba3a90592eb73a15c4c50bc60d65f4e2ff9a6895f2297"
+    }
+  ],
+  "generated_at": "2026-08-29T08:47:58.516876+00:00",
+  "manifest_sha256": "a7180cfc2348cdc81f8ed82311ce8e73e259ecfd03bef9f7184a7a0482f3fb13",
+  "publication_status": "packaged-hosted-series",
+  "release": {
+    "archive_filename": "pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1.tar.gz",
+    "archive_root": "pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1",
+    "checksum_filename": "pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1.tar.gz.sha256",
+    "tag": "benchmark-v0.3.3-minimal-static-gh-33243607869-a1"
+  },
+  "repeats": [
+    {
+      "comparison_sha256": "00aef39189f127b0db2696f4b6eb3c4bde2db140789181b242132c031428ed84",
+      "interleaved_artifact_sha256": "9f311eb9dc313cb20097a7be9a80f29d7059ef2c493c8eb28391f39ac5763846",
+      "path": "repeats/repeat-1",
+      "repeat": 1,
+      "schedule_sha256": "168ff06590e9f3a6cd9346c223a4b5b9151c081f7a0925492d368cb46b45dee3"
+    },
+    {
+      "comparison_sha256": "27c73bacd62c080a4f3134a9b1ed50d03c7f8cd0f50ada5d23d6ea78ef59878f",
+      "interleaved_artifact_sha256": "15e86ad2aa2d35460ca373abb8f0907be20f4929a9f5fa17a7789ce891534acb",
+      "path": "repeats/repeat-2",
+      "repeat": 2,
+      "schedule_sha256": "168ff06590e9f3a6cd9346c223a4b5b9151c081f7a0925492d368cb46b45dee3"
+    },
+    {
+      "comparison_sha256": "126131143f1c0ab0f99da86cb11a7ab7820e9e6f9f9afc4c9a14abb39b74caf0",
+      "interleaved_artifact_sha256": "543ac0a0edd774e432874645ccfb0107a2d70888781a9c7d5224591d93ad5e30",
+      "path": "repeats/repeat-3",
+      "repeat": 3,
+      "schedule_sha256": "168ff06590e9f3a6cd9346c223a4b5b9151c081f7a0925492d368cb46b45dee3"
+    }
+  ],
+  "schema": "pliego.benchmark-evidence-archive",
+  "series": {
+    "path": "series",
+    "series_sha256": "a905a74ff67c85da7aa4f339ae87aa44d4e974da91c18115ceedaae43f8997f0"
+  },
+  "source": {
+    "event_name": "workflow_dispatch",
+    "job": "hosted-snapshot",
+    "ref": "refs/heads/main",
+    "repository": "oxhq/pliego",
+    "revision": "48e8192992d1e9b66eed8ded164ba67cc25a3e7c",
+    "run_attempt": 1,
+    "run_id": 33243607869,
+    "run_url": "https://github.com/oxhq/pliego/actions/runs/33243607869/attempts/1",
+    "workflow": "Pliego hosted performance snapshot",
+    "workflow_ref": "oxhq/pliego/.github/workflows/pliego-performance.yml@refs/heads/main"
+  },
+  "target": {
+    "fixture": "minimal-static",
+    "id": "pliego-0.3.3",
+    "release_tag": "v0.3.3",
+    "runner_environment": "github-hosted",
+    "version": "0.3.3"
+  },
+  "version": 1
+}

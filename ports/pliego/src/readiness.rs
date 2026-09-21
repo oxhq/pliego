@@ -7,16 +7,34 @@ use serde_json::Value;
 const SCRIPT: &str = include_str!("readiness.js");
 const TIMEOUT_TOKEN: &str = "__PLIEGO_TIMEOUT_MS__";
 const WAIT_FOR_FONTS_TOKEN: &str = "__PLIEGO_WAIT_FOR_FONTS__";
+const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
 pub const HOST_EVALUATION_EXPRESSION: &str = "JSON.stringify(window.__pliegoReadiness ?? null)";
 
-pub fn document_start_script(timeout_ms: u64, wait_for_fonts: bool) -> String {
-    SCRIPT
-        .replace(TIMEOUT_TOKEN, &timeout_ms.to_string())
-        .replace(
-            WAIT_FOR_FONTS_TOKEN,
-            if wait_for_fonts { "true" } else { "false" },
-        )
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReadinessPolicy {
+    pub timeout_ms: u64,
+    pub wait_for_fonts: bool,
+}
+
+impl Default for ReadinessPolicy {
+    fn default() -> Self {
+        Self {
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            wait_for_fonts: true,
+        }
+    }
+}
+
+impl ReadinessPolicy {
+    pub fn document_start_script(self) -> String {
+        SCRIPT
+            .replace(TIMEOUT_TOKEN, &self.timeout_ms.to_string())
+            .replace(
+                WAIT_FOR_FONTS_TOKEN,
+                if self.wait_for_fonts { "true" } else { "false" },
+            )
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -87,12 +105,20 @@ pub fn parse_snapshot(json: &str) -> Result<Readiness, String> {
 mod tests {
     use serde_json::json;
 
-    use super::{Readiness, ReadinessError, document_start_script, parse_snapshot};
+    use super::{Readiness, ReadinessError, ReadinessPolicy, parse_snapshot};
 
     #[test]
     fn builds_a_script_with_the_requested_timeout() {
-        let script = document_start_script(2500, true);
-        let offline_script = document_start_script(2500, false);
+        let script = ReadinessPolicy {
+            timeout_ms: 2500,
+            wait_for_fonts: true,
+        }
+        .document_start_script();
+        let offline_script = ReadinessPolicy {
+            timeout_ms: 2500,
+            wait_for_fonts: false,
+        }
+        .document_start_script();
         assert!(!script.contains("__PLIEGO_TIMEOUT_MS__"));
         assert!(!script.contains("__PLIEGO_WAIT_FOR_FONTS__"));
         assert!(script.contains("const shouldWaitForFonts = true;"));

@@ -16,11 +16,18 @@ use servo_constellation_traits::EmbedderToConstellationMessage;
 #[cfg(feature = "webxr")]
 use webxr::WebXrRegistry;
 
+#[doc(hidden)]
+pub use crate::controlled_capture::{
+    ControlledDocumentCaptureError, ControlledDocumentCaptureFailure,
+    ControlledDocumentCaptureReservation, ControlledDocumentCaptureResult,
+    ControlledDocumentCaptureRetry,
+};
 pub use crate::paint::{Paint, WebRenderDebugOption};
 
 #[macro_use]
 mod tracing;
 
+mod controlled_capture;
 mod largest_contentful_paint_calculator;
 mod paint;
 mod painter;

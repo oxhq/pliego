@@ -10,7 +10,8 @@ use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use devtools_traits::{DevtoolScriptControlMsg, ScriptToDevtoolsControlMsg, WorkerId};
 use embedder_traits::user_contents::UserContentManagerId;
 use embedder_traits::{
-    AnimationState, FocusSequenceNumber, JSValue, JavaScriptEvaluationError,
+    AnimationState, DocumentTimeControlError, DocumentTimeControlObservation,
+    DocumentTimeControlRequestId, FocusSequenceNumber, JSValue, JavaScriptEvaluationError,
     JavaScriptEvaluationId, MediaSessionEvent, ScriptToEmbedderChan, Theme, ViewportDetails,
     WakeLockType,
 };
@@ -789,6 +790,11 @@ pub enum ScriptToConstellationMessage {
         JavaScriptEvaluationId,
         Result<JSValue, JavaScriptEvaluationError>,
     ),
+    /// Return a post-turn observation or a committed guarded-advance acknowledgement.
+    ControlledDocumentTimeResponse(
+        DocumentTimeControlRequestId,
+        Box<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
+    ),
     /// Forward a keyboard scroll operation from an `<iframe>` to a parent pipeline.
     ForwardKeyboardScroll(PipelineId, KeyboardScroll),
     /// Notify the Constellation of the screenshot readiness of a given pipeline.
@@ -849,4 +855,37 @@ pub enum RemoteFocusOperation {
     /// Do sequential focus navigation using the `<iframe>` element with the given
     /// [`BrowsingContextId`] as the starting point and in the given direction.
     Sequential(SequentialFocusDirection, Option<BrowsingContextId>),
+}
+
+#[cfg(test)]
+mod tests {
+    use embedder_traits::{DocumentTimeControlError, DocumentTimeControlRequestId};
+
+    use super::ScriptToConstellationMessage;
+
+    #[test]
+    fn controlled_document_time_response_round_trips_through_ipc() {
+        let (sender, receiver) =
+            ipc_channel::ipc::channel::<ScriptToConstellationMessage>().unwrap();
+        sender
+            .send(
+                ScriptToConstellationMessage::ControlledDocumentTimeResponse(
+                    DocumentTimeControlRequestId::new(7),
+                    Box::new(Err(DocumentTimeControlError::WebViewUnavailable)),
+                ),
+            )
+            .unwrap();
+
+        let response = receiver.recv().unwrap();
+        let ScriptToConstellationMessage::ControlledDocumentTimeResponse(request_id, result) =
+            response
+        else {
+            panic!("unexpected Script-to-Constellation response variant")
+        };
+        assert_eq!(request_id.get(), 7);
+        assert!(matches!(
+            *result,
+            Err(DocumentTimeControlError::WebViewUnavailable)
+        ));
+    }
 }

@@ -22,6 +22,16 @@ SAFE_LINK = "https://example.com/pliego"
 JS_MUTATION_TEXT = "JS MUTATION OK"
 SOURCE_AHEM_SHA256 = "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448"
 SANITIZED_AHEM_SHA256 = "649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869"
+PUBLICATION_DIRECTORY = "publication"
+# The recovery journal stays mutable until output commit, so the Rust bundle
+# excludes this control namespace and the checker closes it separately.
+PUBLICATION_JOURNAL_PATHS = (
+    "publication/committed.json",
+    "publication/lease",
+    "publication/outcome.json",
+    "publication/plan.json",
+    "publication/prepared.json",
+)
 RunResult = tuple[bytes, str, bytes, bytes, dict[str, Any]]
 
 
@@ -485,6 +495,54 @@ def verify_pdf_bundle(summary: dict[str, Any], scene_bytes: bytes, fixture_font_
     }
 
 
+def collect_artifact_file_sets(artifact_root: Path, bundle_path: Path) -> tuple[list[str], list[str]]:
+    publication_root = artifact_root / PUBLICATION_DIRECTORY
+    require(
+        publication_root.is_dir() and not publication_root.is_symlink(),
+        f"publication journal directory is not a regular directory: {publication_root}",
+    )
+
+    payload_paths = []
+    publication_paths = []
+    for artifact in artifact_root.rglob("*"):
+        relative_path = artifact.relative_to(artifact_root)
+        relative = relative_path.as_posix()
+        require(not artifact.is_symlink(), f"artifact path is a symlink: {artifact}")
+        if artifact.is_dir():
+            require(
+                relative_path == Path(PUBLICATION_DIRECTORY) or relative_path.parts[0] != PUBLICATION_DIRECTORY,
+                f"publication journal contains an unexpected directory: {artifact}",
+            )
+            continue
+        require(artifact.is_file(), f"artifact path is not a regular file: {artifact}")
+        if artifact == bundle_path:
+            continue
+        require(
+            not (artifact.name.startswith(".") and ".pliego-" in artifact.name and artifact.name.endswith(".tmp")),
+            f"temporary publication file survived: {artifact}",
+        )
+        if relative_path.parts[0] == PUBLICATION_DIRECTORY:
+            publication_paths.append(relative)
+        else:
+            payload_paths.append(relative)
+    return sorted(payload_paths), sorted(publication_paths)
+
+
+def artifact_file_set_error(
+    listed_paths: list[str], payload_paths: list[str], publication_paths: list[str]
+) -> str | None:
+    expected_publication_paths = list(PUBLICATION_JOURNAL_PATHS)
+    if publication_paths != expected_publication_paths:
+        missing = sorted(set(expected_publication_paths) - set(publication_paths))
+        unexpected = sorted(set(publication_paths) - set(expected_publication_paths))
+        return f"publication journal file set is not exact: missing={missing!r}, unexpected={unexpected!r}"
+    if listed_paths != payload_paths:
+        missing = sorted(set(listed_paths) - set(payload_paths))
+        unbundled = sorted(set(payload_paths) - set(listed_paths))
+        return f"bundle does not cover the exact payload file set: missing={missing!r}, unbundled={unbundled!r}"
+    return None
+
+
 def verify_artifact_bundle(summary: dict[str, Any]) -> None:
     bundle_path = artifact_path(summary, "bundle")
     bundle = read_json(bundle_path)
@@ -499,16 +557,9 @@ def verify_artifact_bundle(summary: dict[str, Any]) -> None:
     require(paths == sorted(paths), f"bundle entries are not sorted: {paths!r}")
     require(len(paths) == len(set(paths)), f"bundle entries are duplicated: {paths!r}")
 
-    actual_paths = []
-    for artifact in artifact_root.rglob("*"):
-        if not artifact.is_file() or artifact == bundle_path:
-            continue
-        require(
-            not (artifact.name.startswith(".") and ".pliego-" in artifact.name and artifact.name.endswith(".tmp")),
-            f"temporary publication file survived: {artifact}",
-        )
-        actual_paths.append(artifact.relative_to(artifact_root).as_posix())
-    require(paths == sorted(actual_paths), "bundle does not cover the exact artifact file set")
+    payload_paths, publication_paths = collect_artifact_file_sets(artifact_root, bundle_path)
+    file_set_error = artifact_file_set_error(paths, payload_paths, publication_paths)
+    require(file_set_error is None, file_set_error or "artifact file set is invalid")
 
     for entry, relative in zip(entries, paths):
         require("\\" not in relative and ".." not in relative.split("/"), repr(entry))
@@ -688,6 +739,47 @@ def self_test() -> None:
     fixture = Path(__file__).resolve().parent / "fixtures/text-scene/index.html"
     with tempfile.TemporaryDirectory(prefix="pliego-canonical-scene-self-test-") as temp:
         materialize_fixture(fixture, fixture.with_name("Ahem.ttf"), Path(temp))
+        artifact_root = Path(temp) / "artifact-file-sets"
+        artifact_root.mkdir()
+        bundle_path = artifact_root / "bundle.json"
+        bundle_path.write_bytes(b"{}")
+        (artifact_root / "scene.json").write_bytes(b"scene")
+        for relative in PUBLICATION_JOURNAL_PATHS:
+            publication_path = artifact_root / relative
+            publication_path.parent.mkdir(exist_ok=True)
+            publication_path.write_bytes(b"")
+
+        payload_paths, publication_paths = collect_artifact_file_sets(artifact_root, bundle_path)
+        require(artifact_file_set_error(["scene.json"], payload_paths, publication_paths) is None, repr(payload_paths))
+
+        unexpected_payload = artifact_root / "unexpected.bin"
+        unexpected_payload.write_bytes(b"unbundled")
+        payload_paths, publication_paths = collect_artifact_file_sets(artifact_root, bundle_path)
+        require(
+            artifact_file_set_error(["scene.json"], payload_paths, publication_paths)
+            == "bundle does not cover the exact payload file set: missing=[], unbundled=['unexpected.bin']",
+            repr(payload_paths),
+        )
+        unexpected_payload.unlink()
+
+        unexpected_journal = artifact_root / PUBLICATION_DIRECTORY / "attacker.json"
+        unexpected_journal.write_bytes(b"{}")
+        payload_paths, publication_paths = collect_artifact_file_sets(artifact_root, bundle_path)
+        require(
+            artifact_file_set_error(["scene.json"], payload_paths, publication_paths)
+            == "publication journal file set is not exact: missing=[], unexpected=['publication/attacker.json']",
+            repr(publication_paths),
+        )
+        unexpected_journal.unlink()
+
+        missing_journal = artifact_root / "publication/prepared.json"
+        missing_journal.unlink()
+        payload_paths, publication_paths = collect_artifact_file_sets(artifact_root, bundle_path)
+        require(
+            artifact_file_set_error(["scene.json"], payload_paths, publication_paths)
+            == "publication journal file set is not exact: missing=['publication/prepared.json'], unexpected=[]",
+            repr(publication_paths),
+        )
 
 
 def main() -> int:

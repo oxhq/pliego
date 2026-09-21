@@ -39,6 +39,24 @@ FIDELITY_PROBE_SEQUENCE = (
     TRANSLUCENT_BOLD,
 )
 TRANSLUCENT_COLOR = (15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, 0.5)
+READINESS_PAYLOAD_KEYS = {
+    "fixture",
+    "chartVersion",
+    "canvasWidth",
+    "canvasHeight",
+    "datasetCount",
+    "dataPointCount",
+    "readbackBytes",
+    "paintedPixels",
+    "chromaticBuckets",
+}
+SYNTHETIC_READINESS_KEYS = {
+    "source",
+    "document_time_ns",
+    "script_rendering_epoch",
+    "layout_paint_epoch",
+    "paint_presented_epoch",
+}
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -150,6 +168,14 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def final_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     require(bool(lines), "Pliego produced no stdout JSON")
@@ -158,12 +184,50 @@ def final_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return value
 
 
-def artifact(summary: dict[str, Any], key: str) -> Path:
+def artifact(summary: dict[str, Any], key: str, expected: Path) -> Path:
     value = summary.get(key)
     require(isinstance(value, str), f"summary has no {key}")
-    path = Path(value)
+    path = Path(value).resolve()
+    require(path == expected.resolve(), f"summary {key} escaped its expected path: {path}")
     require(path.is_file(), f"missing {key}: {path}")
     return path
+
+
+def authored_readiness_payload(summary: dict[str, Any], artifacts: Path) -> dict[str, Any]:
+    payload = summary.get("readiness")
+    require(isinstance(payload, dict), f"missing readiness payload: {payload!r}")
+    require(set(payload) == READINESS_PAYLOAD_KEYS, repr(payload))
+    require(SYNTHETIC_READINESS_KEYS.isdisjoint(payload), repr(payload))
+    require(payload.get("fixture") == "chartjs-report", repr(payload))
+    require(payload.get("chartVersion") == CHART_JS_VERSION, repr(payload))
+    require(
+        (payload.get("canvasWidth"), payload.get("canvasHeight")) == CANVAS_SIZE,
+        repr(payload),
+    )
+    require(payload.get("datasetCount") == 2 and payload.get("dataPointCount") == 6, repr(payload))
+    require(payload.get("readbackBytes") == CANVAS_SIZE[0] * CANVAS_SIZE[1] * 4, repr(payload))
+    require(type(payload.get("paintedPixels")) is int and payload["paintedPixels"] > 1_000, repr(payload))
+    require(type(payload.get("chromaticBuckets")) is int and payload["chromaticBuckets"] >= 2, repr(payload))
+
+    render_id = summary.get("render_id")
+    require(isinstance(render_id, str) and render_id, repr(summary))
+    snapshot = read_json(artifacts / "readiness.json")
+    require(
+        snapshot
+        == {
+            "status": "ready",
+            "font_status": "loaded",
+            "payload": payload,
+            "render_id": render_id,
+        },
+        repr(snapshot),
+    )
+    return payload
+
+
+def canonical_json_sha256(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def require_chromatic_pixels(source: Image.Image, description: str) -> tuple[int, int]:
@@ -284,7 +348,13 @@ def install_fixture(fixture: Path, destination: Path) -> Path:
     return destination / "index.html"
 
 
-def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
+def run(
+    binary: Path,
+    fixture: Path,
+    output: Path,
+    *,
+    controlled: bool = False,
+) -> tuple[int, int, dict[str, str], dict[str, Any]]:
     artifacts = output / "artifacts"
     document = output / "document.pdf"
     environment = os.environ.copy()
@@ -292,7 +362,7 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     result = subprocess.run(
         [
             str(binary),
-            "render",
+            "render-controlled" if controlled else "render",
             fixture.name,
             "--output",
             str(document),
@@ -315,18 +385,7 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     summary = final_json(result)
     require(summary.get("status") == "rendered", repr(summary))
 
-    readiness = summary.get("readiness")
-    require(isinstance(readiness, dict), f"missing readiness payload: {readiness!r}")
-    require(readiness.get("fixture") == "chartjs-report", repr(readiness))
-    require(readiness.get("chartVersion") == CHART_JS_VERSION, repr(readiness))
-    require(
-        (readiness.get("canvasWidth"), readiness.get("canvasHeight")) == CANVAS_SIZE,
-        repr(readiness),
-    )
-    require(readiness.get("datasetCount") == 2 and readiness.get("dataPointCount") == 6, repr(readiness))
-    require(readiness.get("readbackBytes") == CANVAS_SIZE[0] * CANVAS_SIZE[1] * 4, repr(readiness))
-    require(isinstance(readiness.get("paintedPixels"), int) and readiness["paintedPixels"] > 1_000, repr(readiness))
-    require(isinstance(readiness.get("chromaticBuckets"), int) and readiness["chromaticBuckets"] >= 2, repr(readiness))
+    readiness = authored_readiness_payload(summary, artifacts)
 
     scene_summary = summary.get("scene")
     require(isinstance(scene_summary, dict), "summary has no scene")
@@ -334,7 +393,7 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     require(scene_summary.get("unsupported_event_count") == 0, repr(scene_summary))
     require(scene_summary.get("text_mapping_gap_count") == 0, repr(scene_summary))
 
-    report = read_json(artifact(summary, "scene_report"))
+    report = read_json(artifact(summary, "scene_report", artifacts / "scene-report.json"))
     capture = report.get("capture")
     require(isinstance(capture, dict) and capture.get("status") == "complete", repr(capture))
     require(capture.get("unsupported_events") == [], repr(capture))
@@ -350,7 +409,8 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     require(isinstance(preview, dict) and preview.get("status") == "rendered", repr(preview))
     require(preview.get("unsupported") == [], repr(preview))
 
-    scene = read_json(artifact(summary, "scene_artifact"))
+    scene_path = artifact(summary, "scene_artifact", artifacts / "scene.json")
+    scene = read_json(scene_path)
     pages = scene.get("pages")
     require(isinstance(pages, list) and len(pages) == 1, repr(pages))
     operations = pages[0].get("operations")
@@ -366,7 +426,7 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     for marker in ["Northstar Operations", "Recognized revenue", "Account contribution"]:
         require(marker in retained_text, f"retained report text is missing {marker!r}")
 
-    fonts = read_json(artifact(summary, "fonts_artifact"))
+    fonts = read_json(artifact(summary, "fonts_artifact", artifacts / "fonts.json"))
     verify_font_fidelity(texts, fonts.get("font_instances"))
     require(len(paths) >= 8, f"styled report retained too few vector paths: {len(paths)}")
     require(len(borders) >= 12, f"styled report silently dropped ordinary borders: {len(borders)}")
@@ -386,13 +446,21 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     require(hashlib.sha256(png).hexdigest() == resource.removeprefix("sha256:"), "Canvas resource hash differs")
     visible, chromatic = require_non_monochrome_chart(resource_path)
 
-    pdf_path = artifact(summary, "document_pdf")
+    pdf_path = artifact(summary, "document_pdf", document)
     pdf = pdf_path.read_bytes()
     require(len(pdf) > 500 and pdf.startswith(b"%PDF-"), "document output is not a nonempty PDF")
     require(summary.get("document_pdf_status") == "rendered", repr(summary))
     require(report.get("document_pdf", {}).get("status") == "rendered", repr(report.get("document_pdf")))
     require_pdf_chart(pdf_path, images[0].get("bounds"), output)
-    return visible, chromatic
+    comparison_sha256 = {
+        "canvas_resource": hashlib.sha256(png).hexdigest(),
+        "document.pdf": hashlib.sha256(pdf).hexdigest(),
+        "render.png": hashlib.sha256(
+            artifact(summary, "rendered_image", artifacts / "render.png").read_bytes()
+        ).hexdigest(),
+        "scene.json": hashlib.sha256(scene_path.read_bytes()).hexdigest(),
+    }
+    return visible, chromatic, comparison_sha256, readiness
 
 
 def self_test(fixture: Path) -> None:
@@ -518,6 +586,46 @@ def self_test(fixture: Path) -> None:
     mixed_style_split[-1]["font_size"] = 10.0
     require_fidelity_rejection(mixed_style_split, "split probe with mixed text styles")
 
+    readiness_payload = {
+        "fixture": "chartjs-report",
+        "chartVersion": CHART_JS_VERSION,
+        "canvasWidth": CANVAS_SIZE[0],
+        "canvasHeight": CANVAS_SIZE[1],
+        "datasetCount": 2,
+        "dataPointCount": 6,
+        "readbackBytes": CANVAS_SIZE[0] * CANVAS_SIZE[1] * 4,
+        "paintedPixels": 2_000,
+        "chromaticBuckets": 3,
+    }
+    with tempfile.TemporaryDirectory(prefix="pliego-chartjs-readiness-self-test-") as temporary:
+        artifacts = Path(temporary)
+        summary = {"render_id": "self-test-render", "readiness": readiness_payload}
+        (artifacts / "readiness.json").write_text(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "font_status": "loaded",
+                    "payload": readiness_payload,
+                    "render_id": "self-test-render",
+                }
+            ),
+            encoding="utf-8",
+        )
+        require(authored_readiness_payload(summary, artifacts) == readiness_payload, repr(summary))
+        require(
+            canonical_json_sha256(readiness_payload)
+            == canonical_json_sha256(dict(reversed(list(readiness_payload.items())))),
+            "readiness payload hashing depends on object insertion order",
+        )
+        synthetic = {**readiness_payload, "source": "controlled-generation-capture"}
+        with redirect_stderr(StringIO()):
+            try:
+                authored_readiness_payload({"render_id": "self-test-render", "readiness": synthetic}, artifacts)
+            except SystemExit:
+                pass
+            else:
+                fail("readiness self-test accepted a synthetic controlled payload")
+
     licenses = (fixture / "THIRD_PARTY_LICENSES.md").read_text(encoding="utf-8")
     require(
         all(name in licenses for name in ["Chart.js 4.5.1", "@kurkle/color 0.3.4", "DejaVu Sans 2.37"]),
@@ -531,17 +639,78 @@ def main() -> int:
         self_test(fixture)
         print("Chart.js report checker self-test: ok")
         return 0
-    if len(sys.argv) != 3:
-        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> <output-directory> | --self-test", 2)
-    binary = Path(sys.argv[1]).resolve()
-    output = Path(sys.argv[2]).resolve()
+    controlled = sys.argv[1:2] == ["--controlled"]
+    arguments = sys.argv[2:] if controlled else sys.argv[1:]
+    if len(arguments) != 2:
+        fail(
+            f"usage: {Path(sys.argv[0]).name} [--controlled] <pliego-binary> <output-directory> | --self-test",
+            2,
+        )
+    binary = Path(arguments[0]).resolve()
+    output = Path(arguments[1]).resolve()
     require(binary.is_file(), f"missing Pliego binary: {binary}")
     require(not output.exists(), f"output already exists: {output}")
     output.mkdir(parents=True)
     with tempfile.TemporaryDirectory(prefix="pliego-chartjs-report-") as temporary:
         installed = install_fixture(fixture, Path(temporary) / "fixture")
-        visible, chromatic = run(binary, installed, output)
-    print(f"Chart.js report check: ok ({visible} visible pixels; {chromatic} chromatic buckets; artifacts: {output})")
+        if controlled:
+            first = output / "first"
+            second = output / "second"
+            stable = output / "stable"
+            first.mkdir()
+            second.mkdir()
+            stable.mkdir()
+            visible, chromatic, first_hashes, first_readiness = run(binary, installed, first, controlled=True)
+            second_visible, second_chromatic, second_hashes, second_readiness = run(
+                binary,
+                installed,
+                second,
+                controlled=True,
+            )
+            require(
+                (visible, chromatic) == (second_visible, second_chromatic), "controlled Chart.js pixel evidence changed"
+            )
+            require(first_hashes == second_hashes, "controlled Chart.js outputs changed between fresh processes")
+            stable_visible, stable_chromatic, stable_hashes, stable_readiness = run(binary, installed, stable)
+            require(
+                (visible, chromatic) == (stable_visible, stable_chromatic),
+                "controlled alias and stable render Chart.js pixel evidence changed",
+            )
+            require(first_readiness == second_readiness == stable_readiness, repr(stable_readiness))
+            (output / "proof.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pliego.controlled-chartjs-proof",
+                        "version": 3,
+                        "binary_sha256": sha256_file(binary),
+                        "fixture_sha256": sha256_file(installed),
+                        "chartjs_umd_sha256": CHART_JS_UMD_SHA256,
+                        "comparison_sha256": first_hashes,
+                        "stable_route_comparison_sha256": stable_hashes,
+                        "successful_fresh_processes": 3,
+                        "readiness_payload_parity": {
+                            "status": "exact",
+                            "controlled_alias_fresh_processes": 2,
+                            "stable_route_fresh_processes": 1,
+                            "payload": first_readiness,
+                            "payload_sha256": canonical_json_sha256(first_readiness),
+                        },
+                        "visible_pixels": visible,
+                        "chromatic_buckets": chromatic,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        else:
+            visible, chromatic, _, _ = run(binary, installed, output)
+    route = "controlled " if controlled else ""
+    print(
+        f"Chart.js report check: ok ({route}{visible} visible pixels; "
+        f"{chromatic} chromatic buckets; artifacts: {output})"
+    )
     return 0
 
 

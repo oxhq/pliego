@@ -115,6 +115,10 @@ pub(crate) struct PipelineAnimations {
 }
 
 impl PipelineAnimations {
+    pub(crate) fn active(&self) -> bool {
+        self.caret.borrow().is_some()
+    }
+
     pub(crate) fn update(&self, caret_visible: bool) -> Option<PropertyValue<ColorF>> {
         let mut maybe_caret = self.caret.borrow_mut();
         let caret = maybe_caret.as_mut()?;

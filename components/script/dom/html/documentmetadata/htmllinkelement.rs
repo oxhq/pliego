@@ -8,6 +8,7 @@ use std::default::Default;
 use std::str::FromStr;
 
 use dom_struct::dom_struct;
+use embedder_traits::WebResourceLoadRole;
 use html5ever::{LocalName, Prefix, local_name};
 use js::context::JSContext;
 use js::rust::HandleObject;
@@ -753,10 +754,11 @@ impl HTMLLinkElement {
         self.request_generation_id
             .set(self.request_generation_id.get().increment());
 
-        let cache_result = window.image_cache().get_cached_image_status(
+        let cache_result = window.image_cache().get_cached_image_status_for_role(
             href,
             window.origin().immutable().clone(),
             cors_setting_for_element(self.upcast()),
+            WebResourceLoadRole::DocumentMetadata,
         );
 
         match cache_result {
@@ -775,7 +777,12 @@ impl HTMLLinkElement {
                 ));
             },
             ImageCacheResult::ReadyForRequest(id) => {
-                let Some(request) = self.default_fetch_and_process_the_linked_resource() else {
+                let Some(request) =
+                    self.default_fetch_and_process_the_linked_resource()
+                        .map(|request| {
+                            request.web_resource_load_role(WebResourceLoadRole::DocumentMetadata)
+                        })
+                else {
                     return;
                 };
 

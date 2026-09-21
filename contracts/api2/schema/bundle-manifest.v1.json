@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/bundle-manifest.v1.json",
+  "title": "Pliego API 2 BundleManifest",
+  "description": "The canonical manifest for deterministic successful delivery bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "entries"],
+  "properties": {
+    "schema": { "const": "pliego.bundle-manifest" },
+    "version": { "const": 1 },
+    "entries": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 1000002,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/pdf_entry" },
+          { "$ref": "#/definitions/scene_entry" },
+          { "$ref": "#/definitions/resource_entry" }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "content_address": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 255,
+      "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*(?:;charset=utf-8)?$"
+    },
+    "pdf_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "const": "document.pdf" },
+        "media_type": { "const": "application/pdf" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "scene_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "const": "scene.json" },
+        "media_type": { "const": "application/vnd.pliego.document-scene+json" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "resource_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^resources/[0-9a-f]{64}$" },
+        "media_type": { "$ref": "#/definitions/media_type" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    }
+  }
+}

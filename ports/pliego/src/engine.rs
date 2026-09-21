@@ -4,69 +4,15 @@
 
 use std::path::PathBuf;
 
-use layout::pages::PageDefinition;
-
-use super::{DEFAULT_LOCALE, DEFAULT_TIMEZONE, READINESS_TIMEOUT_MS};
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RenderEnvironment {
-    pub locale: &'static str,
-    pub timezone: &'static str,
-}
-
-impl Default for RenderEnvironment {
-    fn default() -> Self {
-        Self {
-            locale: DEFAULT_LOCALE,
-            timezone: DEFAULT_TIMEZONE,
-        }
-    }
-}
-
-impl RenderEnvironment {
-    pub(crate) fn artifact(self) -> serde_json::Value {
-        serde_json::json!({
-            "locale": {
-                "requested": self.locale,
-                "resolved": self.locale,
-            },
-            "timezone": {
-                "requested": self.timezone,
-                "resolved": self.timezone,
-            },
-        })
-    }
-}
+pub use super::render_environment::RenderEnvironment;
+use super::resource_policy::ResourcePolicyConfig;
+pub use super::runtime_policy::DeterministicRuntimePolicy;
+use crate::PageDefinition;
 
 #[derive(Debug, PartialEq)]
 pub struct ExplicitRenderPaths {
     pub output: PathBuf,
     pub artifacts: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ResourcePolicyConfig {
-    pub allowed_http_roots: Vec<url::Url>,
-    pub virtual_resources: Vec<VirtualResourceSpec>,
-    pub asset_manifest: Option<PathBuf>,
-    pub timeout_ms: u64,
-}
-
-impl Default for ResourcePolicyConfig {
-    fn default() -> Self {
-        Self {
-            allowed_http_roots: Vec::new(),
-            virtual_resources: Vec::new(),
-            asset_manifest: None,
-            timeout_ms: READINESS_TIMEOUT_MS,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct VirtualResourceSpec {
-    pub url: url::Url,
-    pub path: PathBuf,
 }
 
 #[derive(Debug, PartialEq)]
@@ -75,6 +21,8 @@ pub struct RenderRequest {
     pub environment: RenderEnvironment,
     pub page: PageDefinition,
     pub resources: ResourcePolicyConfig,
+    /// Full normalized deterministic-time and settlement identity.
+    pub runtime_policy: DeterministicRuntimePolicy,
     pub allow_host_fonts: bool,
     pub allow_partial_scene: bool,
     pub explicit_paths: Option<ExplicitRenderPaths>,
@@ -82,14 +30,30 @@ pub struct RenderRequest {
 
 #[derive(Debug)]
 pub struct RenderOutcome {
+    #[allow(dead_code)]
+    // Direct renderer callers consume the structured result; the CLI writes cli_bytes.
     pub summary: serde_json::Value,
+    pub(crate) cli_bytes: Vec<u8>,
+}
+
+impl RenderOutcome {
+    pub(crate) fn from_summary(summary: serde_json::Value) -> Result<Self, serde_json::Error> {
+        let mut cli_bytes = serde_json::to_vec(&summary)?;
+        cli_bytes.push(b'\n');
+        let summary = serde_json::from_slice(&cli_bytes)?;
+        Ok(Self { summary, cli_bytes })
+    }
+
+    pub(crate) fn from_sealed(summary: serde_json::Value, cli_bytes: Vec<u8>) -> Self {
+        Self { summary, cli_bytes }
+    }
 }
 
 #[derive(Debug, PartialEq)]
 pub struct RenderError {
     pub code: String,
     pub message: String,
-    pub exit_code: i32,
+    pub exit_code: u8,
     pub artifacts: Option<PathBuf>,
     pub document_pdf: Option<PathBuf>,
     pub render_id: Option<String>,
@@ -101,7 +65,7 @@ impl RenderError {
         Self::without_publication(code, message, 2)
     }
 
-    pub fn without_publication(code: &str, message: impl Into<String>, exit_code: i32) -> Self {
+    pub fn without_publication(code: &str, message: impl Into<String>, exit_code: u8) -> Self {
         Self {
             code: code.to_owned(),
             message: message.into(),
@@ -140,11 +104,50 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+impl From<super::document_session::SessionError> for RenderError {
+    fn from(error: super::document_session::SessionError) -> Self {
+        if error.code == "INVALID_REQUEST" {
+            Self::request(&error.code, error.message)
+        } else {
+            Self::without_publication(&error.code, error.message, 1)
+        }
+    }
+}
+
 pub struct DocumentEngine;
 
 impl DocumentEngine {
+    /// Render with the selected runtime. DocumentSession wins whenever it is
+    /// enabled; an oracle-only build preserves the pre-cutover explicit API.
+    #[cfg(any(feature = "document-session", feature = "shell-oracle"))]
+    #[allow(dead_code)]
     pub fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
-        crate::render(request)
+        #[cfg(feature = "document-session")]
+        {
+            crate::render(request)
+        }
+        #[cfg(all(not(feature = "document-session"), feature = "shell-oracle"))]
+        {
+            crate::render_with_shell_oracle(request)
+        }
+    }
+
+    /// Render through the generation-bound controlled capture transaction used by the default CLI
+    /// and supported SDK path. It never falls back to realtime capture.
+    #[cfg(feature = "document-session")]
+    pub fn render_controlled(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+        crate::render_controlled(request)
+    }
+
+    /// Exercise the pre-cutover servoshell path as an explicit, nonproduction
+    /// parity oracle. This entrypoint does not participate in default builds.
+    #[cfg(feature = "shell-oracle")]
+    pub fn render_with_shell_oracle(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+        crate::render_with_shell_oracle(request)
     }
 }
 
@@ -152,6 +155,15 @@ impl DocumentEngine {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "shell-oracle", not(feature = "document-session")))]
+    #[test]
+    fn oracle_only_build_preserves_the_render_api_and_typed_oracle_entrypoint() {
+        let _: fn(RenderRequest) -> Result<RenderOutcome, RenderError> = DocumentEngine::render;
+        let _: fn(RenderRequest) -> Result<RenderOutcome, RenderError> =
+            DocumentEngine::render_with_shell_oracle;
+    }
+
+    #[cfg(feature = "document-session")]
     #[test]
     fn missing_input_returns_the_exact_typed_request_error() {
         let input = PathBuf::from("__pliego_document_engine_missing__.html");
@@ -168,6 +180,7 @@ mod tests {
             environment: RenderEnvironment::default(),
             page: crate::default_page(),
             resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
             allow_host_fonts: false,
             allow_partial_scene: false,
             explicit_paths: None,
@@ -181,5 +194,90 @@ mod tests {
         assert_eq!(error.document_pdf, None);
         assert_eq!(error.render_id, None);
         assert!(error.warnings.is_empty());
+    }
+
+    #[cfg(feature = "shell-oracle")]
+    #[test]
+    fn shell_oracle_missing_input_returns_the_exact_typed_request_error() {
+        let input = PathBuf::from("__pliego_shell_oracle_missing__.html");
+        let expected_message = format!(
+            "document is unavailable: {}",
+            std::path::Path::new(".")
+                .canonicalize()
+                .unwrap()
+                .join(&input)
+                .display()
+        );
+        let error = DocumentEngine::render_with_shell_oracle(RenderRequest {
+            input,
+            environment: RenderEnvironment::default(),
+            page: crate::default_page(),
+            resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
+            allow_host_fonts: false,
+            allow_partial_scene: false,
+            explicit_paths: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, "INVALID_REQUEST");
+        assert_eq!(error.message, expected_message);
+        assert_eq!(error.exit_code, 2);
+        assert_eq!(error.artifacts, None);
+        assert_eq!(error.document_pdf, None);
+        assert_eq!(error.render_id, None);
+        assert!(error.warnings.is_empty());
+    }
+
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    #[test]
+    fn session_failures_preserve_the_engine_error_classes() {
+        let request_error = super::super::document_session::DocumentSession::new(
+            "__pliego_document_session_missing__.html",
+            RenderEnvironment::default(),
+            crate::default_page(),
+            ResourcePolicyConfig::default(),
+            false,
+            super::super::readiness::ReadinessPolicy::default(),
+        )
+        .err()
+        .expect("missing input should return a session error");
+        let expected_request_message = request_error.message.clone();
+        let request_error: RenderError = request_error.into();
+
+        assert_eq!(request_error.code, "INVALID_REQUEST");
+        assert_eq!(request_error.message, expected_request_message);
+        assert_eq!(request_error.exit_code, 2);
+        assert_eq!(request_error.artifacts, None);
+        assert_eq!(request_error.document_pdf, None);
+        assert_eq!(request_error.render_id, None);
+        assert!(request_error.warnings.is_empty());
+
+        let layout_error: RenderError = super::super::document_session::SessionError::new(
+            "LAYOUT_CONFIGURATION_FAILED",
+            "already configured",
+        )
+        .into();
+        assert_eq!(layout_error.code, "LAYOUT_CONFIGURATION_FAILED");
+        assert_eq!(layout_error.message, "already configured");
+        assert_eq!(layout_error.exit_code, 1);
+        assert_eq!(layout_error.artifacts, None);
+        assert_eq!(layout_error.document_pdf, None);
+        assert_eq!(layout_error.render_id, None);
+        assert!(layout_error.warnings.is_empty());
+
+        let session_error: RenderError =
+            super::super::document_session::SessionError::new("RESOURCE_DENIED", "blocked").into();
+
+        assert_eq!(session_error.code, "RESOURCE_DENIED");
+        assert_eq!(session_error.message, "blocked");
+        assert_eq!(session_error.exit_code, 1);
+        assert_eq!(session_error.artifacts, None);
+        assert_eq!(session_error.document_pdf, None);
+        assert_eq!(session_error.render_id, None);
+        assert!(session_error.warnings.is_empty());
     }
 }
