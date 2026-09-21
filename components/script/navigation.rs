@@ -33,6 +33,7 @@ use servo_constellation_traits::{
     TargetSnapshotParams,
 };
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
+use timers::{DocumentProducerFence, DocumentProducerGuard, DocumentProducerKind, DocumentTime};
 use url::Position;
 
 use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
@@ -45,6 +46,7 @@ use crate::dom::window::Window;
 use crate::dom::windowproxy::WindowProxy;
 use crate::fetch::FetchCanceller;
 use crate::messaging::MainThreadScriptMsg;
+use crate::producer_fence::DocumentProducerEnvelope;
 use crate::script_thread::ScriptThread;
 
 #[derive(Clone)]
@@ -57,8 +59,30 @@ pub struct NavigationListener {
 }
 
 impl NavigationListener {
-    pub(crate) fn into_callback(self) -> BoxedFetchCallback {
-        Box::new(move |response_msg| self.notify_fetch(response_msg))
+    pub(crate) fn into_fenced_callback(
+        self,
+        producer_fence: &DocumentProducerFence,
+    ) -> BoxedFetchCallback {
+        let producer_fence = producer_fence.clone();
+        let mut producer_guard = Some(
+            producer_fence
+                .begin(DocumentProducerKind::Resource)
+                .expect("document navigation producer sequence exhausted"),
+        );
+        Box::new(move |response_msg| {
+            let terminal = matches!(response_msg, FetchResponseMsg::ProcessResponseEOF(..)) ||
+                Self::http_redirect_metadata(&response_msg).is_some();
+            let message_guard = if terminal {
+                producer_guard.take()
+            } else {
+                Some(
+                    producer_fence
+                        .begin(DocumentProducerKind::Resource)
+                        .expect("document navigation message sequence exhausted"),
+                )
+            };
+            self.notify_fetch(response_msg, message_guard, terminal)
+        })
     }
 
     pub fn new(
@@ -76,24 +100,33 @@ impl NavigationListener {
         self,
         core_resource_thread: &CoreResourceThread,
         response_init: Option<ResponseInit>,
+        producer_fence: &DocumentProducerFence,
     ) {
+        let request_builder = self.request_builder.clone();
+        let callback = self.into_fenced_callback(producer_fence);
         fetch_async(
             core_resource_thread,
-            self.request_builder.clone(),
+            request_builder,
             response_init,
-            self.into_callback(),
+            callback,
         );
     }
 
-    fn notify_fetch(&self, message: FetchResponseMsg) {
+    fn notify_fetch(
+        &self,
+        message: FetchResponseMsg,
+        producer_guard: Option<DocumentProducerGuard>,
+        terminal: bool,
+    ) {
         // If we've already asked the main thread to redirect the response, then stop sending results
         // for this fetch. The main thread has already replaced it.
         if !self.send_results_to_main_thread.get() {
             return;
         }
 
-        // If this is a redirect, don't send any more message after this one.
-        if Self::http_redirect_metadata(&message).is_some() {
+        // A terminal message transfers the root lease into this event-loop message. Ignore any
+        // stale producer callback after that terminal handoff.
+        if terminal {
             self.send_results_to_main_thread.set(false);
         }
 
@@ -105,7 +138,7 @@ impl NavigationListener {
             .main_thread_sender
             .send(MainThreadScriptMsg::NavigationResponse {
                 pipeline_id,
-                message: Box::new(message),
+                response: Box::new(DocumentProducerEnvelope::new(message, producer_guard)),
             });
 
         if let Err(error) = result {
@@ -166,6 +199,9 @@ pub(crate) struct InProgressLoad {
     /// Timestamp reporting the time when the browser started this load.
     #[no_trace]
     pub(crate) navigation_start: CrossProcessInstant,
+    /// Navigation start in the owning script event loop's document-clock domain.
+    #[no_trace]
+    pub(crate) document_time_origin: DocumentTime,
     /// For cancelling the fetch
     pub(crate) canceller: FetchCanceller,
     /// The [`LoadData`] associated with this load.
@@ -188,7 +224,10 @@ pub(crate) struct InProgressLoad {
 
 impl InProgressLoad {
     /// Create a new InProgressLoad object.
-    pub(crate) fn new(new_pipeline_info: NewPipelineInfo) -> InProgressLoad {
+    pub(crate) fn new(
+        new_pipeline_info: NewPipelineInfo,
+        document_time_origin: DocumentTime,
+    ) -> InProgressLoad {
         let url = new_pipeline_info.load_data.url.clone();
         InProgressLoad {
             pipeline_id: new_pipeline_info.new_pipeline_id,
@@ -200,6 +239,7 @@ impl InProgressLoad {
             activity: DocumentActivity::FullyActive,
             throttled: false,
             navigation_start: CrossProcessInstant::now(),
+            document_time_origin,
             canceller: Default::default(),
             load_data: new_pipeline_info.load_data,
             url_list: vec![url],

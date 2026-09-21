@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +18,8 @@ from typing import Any
 
 FONT_SHA256 = "62a9934d08c576ce59cdfda6e1b31746e5785f58562b3fd545df791075e5796c"
 PROCESS_TIMEOUT_SECONDS = 60
+UNIX_SOCKET_PATH_BYTES = 108
+WAYLAND_SOCKET_NAME = "wayland-0"
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -82,6 +85,10 @@ def final_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return value
 
 
+def unix_socket_path_fits(path: Path) -> bool:
+    return len(os.fsencode(path)) + 1 <= UNIX_SOCKET_PATH_BYTES
+
+
 def run(
     binary: Path,
     root: Path,
@@ -90,9 +97,7 @@ def run(
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     root.mkdir()
     home = root / "home"
-    runtime = home / "runtime"
-    runtime.mkdir(parents=True)
-    runtime.chmod(0o700)
+    home.mkdir()
     (root / "document.html").write_text(document, encoding="utf-8")
     command = [
         str(binary),
@@ -109,27 +114,36 @@ def run(
     ]
     for allowed_root in roots:
         command.extend(("--allow-http-root", allowed_root))
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(home),
-            "NO_PROXY": "127.0.0.1,localhost",
-            "XDG_CACHE_HOME": str(home / "cache"),
-            "XDG_CONFIG_HOME": str(home / "config"),
-            "XDG_DATA_HOME": str(home / "data"),
-            "XDG_RUNTIME_DIR": str(runtime),
-            "no_proxy": "127.0.0.1,localhost",
-        }
-    )
-    result = subprocess.run(
-        command,
-        cwd=root,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=PROCESS_TIMEOUT_SECONDS,
-        check=False,
-    )
+    short_runtime_root = "/tmp" if os.name == "posix" else None
+    with tempfile.TemporaryDirectory(prefix="pliego-runtime-", dir=short_runtime_root) as runtime_name:
+        runtime = Path(runtime_name)
+        runtime.chmod(0o700)
+        if os.name == "posix":
+            require(
+                unix_socket_path_fits(runtime / WAYLAND_SOCKET_NAME),
+                f"XDG runtime socket path exceeds {UNIX_SOCKET_PATH_BYTES} bytes",
+            )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "HOME": str(home),
+                "NO_PROXY": "127.0.0.1,localhost",
+                "XDG_CACHE_HOME": str(home / "cache"),
+                "XDG_CONFIG_HOME": str(home / "config"),
+                "XDG_DATA_HOME": str(home / "data"),
+                "XDG_RUNTIME_DIR": str(runtime),
+                "no_proxy": "127.0.0.1,localhost",
+            }
+        )
+        result = subprocess.run(
+            command,
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=PROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
     (root / "process.stdout.log").write_text(result.stdout, encoding="utf-8")
     (root / "process.stderr.log").write_text(result.stderr, encoding="utf-8")
     summary = final_json(result)

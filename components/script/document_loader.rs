@@ -13,10 +13,12 @@ use net_traits::{BoxedFetchCallback, ResourceThreads, fetch_async};
 use script_bindings::cell::DomRefCell;
 use script_bindings::script_runtime::{during_gc_collection, runtime_is_alive};
 use servo_url::ServoUrl;
+use timers::DocumentProducerFence;
 
 use crate::dom::bindings::root::Dom;
 use crate::dom::document::Document;
 use crate::fetch::FetchCanceller;
+use crate::producer_fence::fence_fetch_until_eof;
 
 #[derive(Clone, Debug, Eq, Hash, JSTraceable, MallocSizeOf, PartialEq)]
 pub(crate) enum LoadType {
@@ -100,16 +102,24 @@ pub(crate) struct DocumentLoader {
     blocking_loads: HashMap<LoadType, u32>,
     events_inhibited: bool,
     cancellers: Vec<FetchCanceller>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "The producer fence is shared by the ScriptThread"]
+    producer_fence: DocumentProducerFence,
 }
 
 impl DocumentLoader {
     pub(crate) fn new(existing: &DocumentLoader) -> DocumentLoader {
-        DocumentLoader::new_with_threads(existing.resource_threads.clone(), None)
+        DocumentLoader::new_with_threads(
+            existing.resource_threads.clone(),
+            None,
+            existing.producer_fence.clone(),
+        )
     }
 
     pub(crate) fn new_with_threads(
         resource_threads: ResourceThreads,
         initial_load: Option<ServoUrl>,
+        producer_fence: DocumentProducerFence,
     ) -> DocumentLoader {
         debug!("Initial blocking load {:?}.", initial_load);
 
@@ -123,6 +133,7 @@ impl DocumentLoader {
             blocking_loads: initial_loads,
             events_inhibited: false,
             cancellers: Vec::new(),
+            producer_fence,
         }
     }
 
@@ -166,6 +177,7 @@ impl DocumentLoader {
             request.keep_alive,
             self.resource_threads.core_thread.clone(),
         ));
+        let callback = fence_fetch_until_eof(&self.producer_fence, callback);
         fetch_async(&self.resource_threads.core_thread, request, None, callback);
     }
 
@@ -209,5 +221,9 @@ impl DocumentLoader {
 
     pub(crate) fn resource_threads(&self) -> &ResourceThreads {
         &self.resource_threads
+    }
+
+    pub(crate) fn producer_fence(&self) -> DocumentProducerFence {
+        self.producer_fence.clone()
     }
 }

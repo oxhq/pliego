@@ -26,7 +26,7 @@ from typing import Any, IO
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
-RUNTIMES = ROOT / "sdk" / "laravel" / "resources" / "runtimes.json"
+DEFAULT_TARGET = "pliego-0.3.3"
 
 sys.path.insert(0, str(ROOT / "python"))
 from check_pliego_release_archive import check_archive  # noqa: E402
@@ -58,11 +58,15 @@ def load_release(target_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
     required = {
         "version",
+        "api",
         "repository",
         "release_tag",
         "commit",
         "servo_build",
         "servo_base",
+        "runtime_manifest",
+        "runtime_manifest_bytes",
+        "runtime_manifest_sha256",
         "platform",
         "profile",
         "archive",
@@ -85,15 +89,41 @@ def load_release(target_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         raise ReleaseError("Linux release binary must be named pliego")
     if not isinstance(target["repository"], str) or not target["repository"].startswith("https://github.com/"):
         raise ReleaseError("release repository must be an HTTPS GitHub URL")
-    if not all(isinstance(target[key], int) and target[key] > 0 for key in ("archive_bytes", "binary_bytes")):
+    if not all(
+        isinstance(target[key], int) and target[key] > 0
+        for key in ("archive_bytes", "binary_bytes", "runtime_manifest_bytes")
+    ):
         raise ReleaseError("release byte counts must be positive integers")
-    for key, length in (("commit", 40), ("servo_base", 40), ("archive_sha256", 64), ("binary_sha256", 64)):
+    for key, length in (
+        ("commit", 40),
+        ("servo_base", 40),
+        ("archive_sha256", 64),
+        ("binary_sha256", 64),
+        ("runtime_manifest_sha256", 64),
+    ):
         if not isinstance(target[key], str) or re.fullmatch(f"[0-9a-f]{{{length}}}", target[key]) is None:
             raise ReleaseError(f"target {key} is not a pinned digest")
 
-    runtimes = json.loads(RUNTIMES.read_text(encoding="utf-8"))
-    if runtimes.get("version") != target["version"]:
-        raise ReleaseError("Laravel runtime manifest version differs from benchmark target")
+    manifest_relative = PurePosixPath(target["runtime_manifest"])
+    if (
+        manifest_relative.is_absolute()
+        or ".." in manifest_relative.parts
+        or manifest_relative.parts[:2] != ("benchmarks", "releases")
+    ):
+        raise ReleaseError("runtime manifest must be retained under benchmarks/releases")
+    manifest_path = ROOT.joinpath(*manifest_relative.parts)
+    manifest_sha256, manifest_bytes = sha256_file(manifest_path)
+    if manifest_bytes != target["runtime_manifest_bytes"] or manifest_sha256 != target["runtime_manifest_sha256"]:
+        raise ReleaseError("retained runtime manifest differs from the promoted release asset")
+
+    runtimes = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        runtimes.get("schema") != 1
+        or runtimes.get("version") != target["version"]
+        or runtimes.get("api") != target["api"]
+        or runtimes.get("release_ready") is not True
+    ):
+        raise ReleaseError("promoted runtime manifest contract differs from benchmark target")
     runtime = runtimes.get("assets", {}).get("linux-x86_64")
     if not isinstance(runtime, dict):
         raise ReleaseError("Laravel runtime manifest lacks linux-x86_64")
@@ -130,11 +160,28 @@ def verify_archive(archive: Path, target: dict[str, Any], runtime: dict[str, Any
     if archive_bytes != target["archive_bytes"] or archive_hash != target["archive_sha256"]:
         raise ReleaseError("release archive size or SHA-256 differs from the immutable target")
 
+    servo_build = target.get("servo_build")
+    if not isinstance(servo_build, str):
+        raise ReleaseError("Servo build identity must be a string")
+    match = re.fullmatch(
+        r"(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)-"
+        r"(?P<revision>[0-9a-f]{7,64})",
+        servo_build,
+    )
+    if match is None:
+        raise ReleaseError("Servo build identity must contain a version and Git revision")
+    servo_revision = match.group("revision")
+    if not target["commit"].startswith(servo_revision):
+        raise ReleaseError("Servo build revision differs from the release commit")
+
     errors = check_archive(
         archive,
         version=target["version"],
         bundle=target["platform"],
         repository_url=target["repository"],
+        servo_version=match.group("version"),
+        git_sha=servo_revision,
+        servo_base_sha=target["servo_base"],
     )
     if errors:
         raise ReleaseError(errors[0])
@@ -158,18 +205,6 @@ def verify_archive(archive: Path, target: dict[str, Any], runtime: dict[str, Any
         binary_hash, binary_bytes = sha256_stream(binary)
         if binary_bytes != target["binary_bytes"] or binary_hash != target["binary_sha256"]:
             raise ReleaseError("release binary size or SHA-256 differs from the immutable target")
-
-        version_file = source.extractfile(files["VERSION.txt"])
-        if version_file is None:
-            raise ReleaseError("VERSION.txt cannot be read")
-        version_text = version_file.read().decode("utf-8").replace("\r\n", "\n")
-        expected_lines = {
-            f"pliego {target['version']}",
-            f"Servo {target['servo_build']}",
-            f"Servo base {target['servo_base']}",
-        }
-        if not expected_lines.issubset(set(version_text.splitlines())):
-            raise ReleaseError("VERSION.txt differs from the pinned native/Servo identity")
 
     return {
         "archive_sha256": archive_hash,
@@ -255,7 +290,7 @@ def obtain_archive(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", default="pliego-0.1.1")
+    parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument("--cache", type=Path, default=Path.home() / ".cache" / "pliego-benchmarks")
     parser.add_argument("--archive", type=Path, help="verify this exact archive instead of downloading")
     parser.add_argument("--offline", action="store_true", help="refuse network access")
@@ -279,6 +314,9 @@ def main() -> int:
             "servo_base": target["servo_base"],
             "platform": target["platform"],
             "profile": target["profile"],
+            "runtime_manifest": target["runtime_manifest"],
+            "runtime_manifest_bytes": target["runtime_manifest_bytes"],
+            "runtime_manifest_sha256": target["runtime_manifest_sha256"],
             "archive": str(archive),
             "binary": str(binary),
             **evidence,

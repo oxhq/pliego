@@ -5,11 +5,12 @@
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object_with_cx;
-use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_url::ServoUrl;
 use time::Duration;
 
-use super::performanceentry::{EntryType, PerformanceEntry};
+use super::performanceentry::{
+    EntryType, PerformanceEntry, PerformanceEntryDuration, PerformanceEntryTime,
+};
 use crate::dom::bindings::codegen::Bindings::LargestContentfulPaintBinding::LargestContentfulPaintMethods;
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -22,9 +23,11 @@ use crate::dom::globalscope::GlobalScope;
 pub(crate) struct LargestContentfulPaint {
     entry: PerformanceEntry,
     #[no_trace]
-    load_time: CrossProcessInstant,
+    #[ignore_malloc_size_of = "The timestamp provenance has no heap allocations"]
+    load_time: PerformanceEntryTime,
     #[no_trace]
-    render_time: CrossProcessInstant,
+    #[ignore_malloc_size_of = "The timestamp provenance has no heap allocations"]
+    render_time: PerformanceEntryTime,
     size: usize,
     url: DOMString,
     element: Option<Dom<Element>>,
@@ -32,18 +35,24 @@ pub(crate) struct LargestContentfulPaint {
 
 impl LargestContentfulPaint {
     pub(crate) fn new_inherited(
-        render_time: CrossProcessInstant,
+        render_time: PerformanceEntryTime,
         size: usize,
         url: Option<ServoUrl>,
     ) -> LargestContentfulPaint {
+        let load_time = match render_time {
+            PerformanceEntryTime::Host(_) => PerformanceEntryTime::Host(
+                servo_base::cross_process_instant::CrossProcessInstant::epoch(),
+            ),
+            PerformanceEntryTime::Document(_) => PerformanceEntryTime::Document(Duration::ZERO),
+        };
         LargestContentfulPaint {
             entry: PerformanceEntry::new_inherited(
                 DOMString::from(""),
                 EntryType::LargestContentfulPaint,
                 Some(render_time),
-                Duration::ZERO,
+                PerformanceEntryDuration::for_time(render_time, Duration::ZERO),
             ),
-            load_time: CrossProcessInstant::epoch(),
+            load_time,
             render_time,
             size,
             url: url.map(|u| DOMString::from(u.as_str())).unwrap_or_default(),
@@ -54,7 +63,7 @@ impl LargestContentfulPaint {
     pub(crate) fn new(
         cx: &mut JSContext,
         global: &GlobalScope,
-        render_time: CrossProcessInstant,
+        render_time: PerformanceEntryTime,
         size: usize,
         url: Option<ServoUrl>,
     ) -> DomRoot<LargestContentfulPaint> {
@@ -75,14 +84,14 @@ impl LargestContentfulPaintMethods<crate::DomTypeHolder> for LargestContentfulPa
     fn LoadTime(&self, cx: &mut JSContext) -> DOMHighResTimeStamp {
         self.global()
             .performance(cx)
-            .to_dom_high_res_time_stamp(self.load_time)
+            .entry_time_to_dom_high_res_time_stamp(self.load_time)
     }
 
     /// <https://www.w3.org/TR/largest-contentful-paint/#dom-largestcontentfulpaint-rendertime>
     fn RenderTime(&self, cx: &mut JSContext) -> DOMHighResTimeStamp {
         self.global()
             .performance(cx)
-            .to_dom_high_res_time_stamp(self.render_time)
+            .entry_time_to_dom_high_res_time_stamp(self.render_time)
     }
 
     /// <https://www.w3.org/TR/largest-contentful-paint/#dom-largestcontentfulpaint-size>

@@ -216,14 +216,21 @@ impl GamepadHapticActuatorMethods<crate::DomTypeHolder> for GamepadHapticActuato
         self.effect_sequence_id.set(self.sequence_id.get());
 
         let context = Trusted::new(self);
+        let task_source: SendableTaskSource =
+            self.global().task_manager().gamepad_task_source().into();
+        let mut external_callback = task_source.begin_external_callback();
         let listener = HapticEffectListener {
-            task_source: self.global().task_manager().gamepad_task_source().into(),
+            task_source,
             context,
         };
 
-        let callback = GenericCallback::new(move |message| match message {
-            Ok(msg) => listener.handle_completed(msg),
-            Err(error) => warn!("Error receiving a GamepadMsg: {error:?}"),
+        let callback = GenericCallback::new(move |message| {
+            let external_callback = external_callback.take();
+            match message {
+                Ok(msg) => listener.handle_completed(msg),
+                Err(error) => warn!("Error receiving a GamepadMsg: {error:?}"),
+            }
+            drop(external_callback);
         })
         .expect("Could not create generic callback");
 
@@ -276,14 +283,21 @@ impl GamepadHapticActuatorMethods<crate::DomTypeHolder> for GamepadHapticActuato
         self.reset_sequence_id.set(self.sequence_id.get());
 
         let context = Trusted::new(self);
+        let task_source: SendableTaskSource =
+            self.global().task_manager().gamepad_task_source().into();
+        let mut external_callback = task_source.begin_external_callback();
         let listener = HapticEffectListener {
-            task_source: self.global().task_manager().gamepad_task_source().into(),
+            task_source,
             context,
         };
 
-        let callback = GenericCallback::new(move |message| match message {
-            Ok(success) => listener.handle_stopped(success),
-            Err(error) => warn!("Error receiving a GamepadMsg: {error:?}"),
+        let callback = GenericCallback::new(move |message| {
+            let external_callback = external_callback.take();
+            match message {
+                Ok(success) => listener.handle_stopped(success),
+                Err(error) => warn!("Error receiving a GamepadMsg: {error:?}"),
+            }
+            drop(external_callback);
         })
         .expect("Could not create callback");
 

@@ -7,13 +7,10 @@ namespace Pliego\Php;
 use RuntimeException;
 use Throwable;
 
+/** Verifies the installed API 2 tuple with a real offline transaction. */
 final readonly class Doctor
 {
-    private const SUPPORTED_API_VERSION = '1';
-
-    /**
-     * @param non-empty-list<string> $command
-     */
+    /** @param non-empty-list<string> $command */
     public function __construct(private array $command, private int $timeoutSeconds = 60)
     {
         if ($command === [] || $timeoutSeconds < 1) {
@@ -22,131 +19,112 @@ final readonly class Doctor
     }
 
     /**
-     * @return array{binary: string, version: string, api_version: int, platform: string, work_root: string, smoke_pdf: string}
+     * @return array{
+     *   binary: string,
+     *   version: string,
+     *   api_version: int,
+     *   platform: string,
+     *   work_root: string,
+     *   smoke_pdf: string,
+     *   smoke_scene: string,
+     *   smoke_bundle: string,
+     *   delivery_identity: string
+     * }
      */
     public function run(string $workDirectory): array
     {
         $command = $this->resolvedCommand();
-        [$exitCode, $stdout, $stderr] = $this->execute([...$command, '--version']);
-        if ($exitCode !== 0) {
-            $detail = trim($stderr) ?: "exit code {$exitCode}";
-            throw new RuntimeException(
-                "Pliego cannot run on ".PHP_OS_FAMILY.": {$detail}. Install Pliego or set PLIEGO_BINARY to a compatible executable.",
+        try {
+            $engine = new DocumentEngine(
+                $command,
+                $workDirectory,
+                timeoutSeconds: $this->timeoutSeconds,
+                probeTimeoutSeconds: max(180, $this->timeoutSeconds),
             );
-        }
-        if (preg_match('/^pliego ([^\s]+)\r?$/m', $stdout, $match) !== 1) {
+            $contract = $engine->contract();
+        } catch (Throwable $error) {
             throw new RuntimeException(
-                'PLIEGO_BINARY does not expose the expected `pliego <version>` output; install a compatible Pliego CLI.',
-            );
-        }
-        if (preg_match('/^pliego-api ([0-9]+)\r?$/m', $stdout, $apiMatch) !== 1) {
-            throw new RuntimeException(
-                'PLIEGO_BINARY does not expose `pliego-api <version>`; this SDK requires Pliego API v1.',
-            );
-        }
-        if ($apiMatch[1] !== self::SUPPORTED_API_VERSION) {
-            throw new RuntimeException(
-                "PLIEGO_BINARY exposes unsupported Pliego API v{$apiMatch[1]}; this SDK requires v1.",
+                'PLIEGO_BINARY does not expose the compatible API 2 contract: '.$error->getMessage(),
+                previous: $error,
             );
         }
 
-        $root = $this->prepareWorkRoot($workDirectory);
-        $job = $root.DIRECTORY_SEPARATOR.bin2hex(random_bytes(16));
-        if (!@mkdir($job, 0700)) {
-            throw new RuntimeException(
-                "Pliego work root is not writable: {$root}. Grant PHP write access or set PLIEGO_WORK_DIR.",
-            );
-        }
-        $style = $job.DIRECTORY_SEPARATOR.'doctor.css';
         $font = dirname(__DIR__).'/resources/HasubiMono-Regular.woff2';
         if (!is_file($font)) {
             throw new RuntimeException('Pliego doctor bundled font is missing; reinstall oxhq/pliego-php.');
         }
+        $sourceDirectory = rtrim($workDirectory, '/\\').DIRECTORY_SEPARATOR.'.doctor-'.bin2hex(random_bytes(8));
+        if (!@mkdir($sourceDirectory, 0700)) {
+            throw new RuntimeException("cannot create offline doctor staging directory in {$workDirectory}");
+        }
+        $style = $sourceDirectory.DIRECTORY_SEPARATOR.'doctor.css';
         if (file_put_contents(
             $style,
             "@font-face { font-family: \"Pliego Doctor\"; src: url(\"doctor.woff2\") format(\"woff2\"); }\n"
                 ."body { font: 12px/1.4 \"Pliego Doctor\"; }\n",
             LOCK_EX,
         ) === false) {
-            throw new RuntimeException("cannot write the offline doctor asset in {$job}");
+            @rmdir($sourceDirectory);
+            throw new RuntimeException("cannot write the offline doctor asset in {$sourceDirectory}");
         }
 
         try {
-            $result = (new CliRenderer($command, $this->timeoutSeconds))->render(
+            $result = $engine->render(
                 '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="assets/doctor.css"><p>Pliego doctor</p>',
-                $job.DIRECTORY_SEPARATOR.'input',
-                $job.DIRECTORY_SEPARATOR.'doctor.pdf',
-                $job.DIRECTORY_SEPARATOR.'artifacts',
-                new RenderOptions(allowedHttpRoots: []),
+                new RenderOptions(
+                    allowedHttpRoots: [],
+                    hostWallMilliseconds: max(
+                        1,
+                        min(60_000, ($this->timeoutSeconds * 1_000) - 1_000),
+                    ),
+                ),
                 [
-                    'assets/doctor.css' => $style,
-                    'assets/doctor.woff2' => $font,
+                    new InputAsset('assets/doctor.css', $style, 'text/css;charset=utf-8'),
+                    new InputAsset('assets/doctor.woff2', $font, 'font/woff2'),
                 ],
             );
         } catch (Throwable $error) {
             throw new RuntimeException(
-                "Pliego offline smoke failed; evidence retained at {$job}: {$error->getMessage()}",
+                "Pliego API 2 offline smoke failed: {$error->getMessage()}",
                 previous: $error,
             );
+        } finally {
+            @unlink($style);
+            @rmdir($sourceDirectory);
         }
+
         if (!str_starts_with($result->bytes(), '%PDF-')) {
-            throw new RuntimeException("Pliego offline smoke returned a non-PDF file at {$result->pdfPath}");
+            throw new RuntimeException("Pliego API 2 offline smoke returned a non-PDF file at {$result->pdfPath}");
         }
-        try {
-            $fonts = json_decode(
-                (string) @file_get_contents($result->artifactsPath.DIRECTORY_SEPARATOR.'fonts.json'),
-                true,
-                flags: JSON_THROW_ON_ERROR,
-            );
-            $structure = json_decode(
-                (string) @file_get_contents($result->artifactsPath.DIRECTORY_SEPARATOR.'pdf-structure.json'),
-                true,
-                flags: JSON_THROW_ON_ERROR,
-            );
-        } catch (Throwable $error) {
-            throw new RuntimeException(
-                "Pliego offline smoke evidence is unreadable at {$result->artifactsPath}",
-                previous: $error,
-            );
-        }
-        $selection = is_array($fonts) && is_array($fonts['selections'][0] ?? null)
-            ? $fonts['selections'][0]
-            : [];
-        $page = is_array($structure) && is_array($structure['pages'][0] ?? null)
-            ? $structure['pages'][0]
-            : [];
+        $scene = $result->metadata['delivery']['scene'] ?? null;
+        $bundle = $result->metadata['delivery']['bundle'] ?? null;
         if (
-            !is_array($fonts)
-            || !is_array($structure)
-            || ($fonts['schema'] ?? null) !== 'pliego.font-report'
-            || ($fonts['version'] ?? null) !== 1
-            || ($selection['source'] ?? null) !== 'bundled'
-            || ($selection['requested_families'] ?? null) !== ['Pliego Doctor']
-            || ($selection['selected_family'] ?? null) !== 'Pliego Doctor'
-            || ($structure['schema'] ?? null) !== 'pliego.pdf-structure'
-            || ($structure['version'] ?? null) !== 1
-            || ($structure['pdf']['bytes'] ?? null) !== filesize($result->pdfPath)
-            || ($structure['pdf']['sha256'] ?? null) !== 'sha256:'.hash_file('sha256', $result->pdfPath)
-            || ($page['expected_extracted_unicode'] ?? null) !== 'Pliego doctor'
-            || !is_int($page['operation_counts']['text'] ?? null)
-            || $page['operation_counts']['text'] < 1
+            !is_array($scene)
+            || !is_array($bundle)
+            || $result->deliveryIdentity === null
+            || $result->deliveryIdentity !== ($bundle['sha256'] ?? null)
+            || !is_file($result->scenePath)
+            || !is_file($result->bundlePath)
         ) {
-            throw new RuntimeException("Pliego offline smoke evidence is incomplete at {$result->artifactsPath}");
+            throw new RuntimeException("Pliego API 2 offline smoke evidence is incomplete at {$result->jobPath}");
         }
+
+        $identity = $contract->engine();
 
         return [
             'binary' => $command[0],
-            'version' => $match[1],
-            'api_version' => (int) $apiMatch[1],
+            'version' => $identity['version'],
+            'api_version' => $identity['api'],
             'platform' => PHP_OS_FAMILY.' '.(PHP_INT_SIZE * 8).'-bit',
-            'work_root' => $root,
+            'work_root' => dirname($result->jobPath),
             'smoke_pdf' => $result->pdfPath,
+            'smoke_scene' => $result->scenePath,
+            'smoke_bundle' => $result->bundlePath,
+            'delivery_identity' => $result->deliveryIdentity,
         ];
     }
 
-    /**
-     * @return non-empty-list<string>
-     */
+    /** @return non-empty-list<string> */
     private function resolvedCommand(): array
     {
         foreach ($this->command as $part) {
@@ -175,117 +153,5 @@ final readonly class Doctor
         }
 
         return [$candidate, ...array_slice($this->command, 1)];
-    }
-
-    private function prepareWorkRoot(string $workDirectory): string
-    {
-        if (
-            $workDirectory === ''
-            || str_contains($workDirectory, "\0")
-            || (!$this->isAbsolutePath($workDirectory))
-            || is_link($workDirectory)
-            || is_link(rtrim($workDirectory, '/\\'))
-        ) {
-            throw new RuntimeException(
-                'PLIEGO_WORK_DIR must be an absolute, non-symlink directory outside the filesystem root.',
-            );
-        }
-        if (!is_dir($workDirectory) && !@mkdir($workDirectory, 0700, true)) {
-            throw new RuntimeException(
-                "Pliego work root cannot be created: {$workDirectory}. Grant PHP write access or set PLIEGO_WORK_DIR.",
-            );
-        }
-
-        $resolved = realpath($workDirectory);
-        if (
-            $resolved === false
-            || !is_dir($resolved)
-            || $resolved === DIRECTORY_SEPARATOR
-            || preg_match('/^[A-Za-z]:[\\\\\/]?$/', $resolved) === 1
-            || $this->samePath(dirname($resolved), $resolved)
-        ) {
-            throw new RuntimeException(
-                'PLIEGO_WORK_DIR resolves to an unsafe filesystem root; configure a dedicated directory.',
-            );
-        }
-        if (!is_writable($resolved)) {
-            throw new RuntimeException(
-                "Pliego work root is not writable: {$resolved}. Grant PHP write access or set PLIEGO_WORK_DIR.",
-            );
-        }
-
-        return $resolved;
-    }
-
-    /**
-     * @param non-empty-list<string> $arguments
-     * @return array{int, string, string}
-     */
-    private function execute(array $arguments): array
-    {
-        $stdoutFile = tmpfile();
-        $stderrFile = tmpfile();
-        if (!is_resource($stdoutFile) || !is_resource($stderrFile)) {
-            if (is_resource($stdoutFile)) {
-                fclose($stdoutFile);
-            }
-            if (is_resource($stderrFile)) {
-                fclose($stderrFile);
-            }
-            throw new RuntimeException('cannot create Pliego doctor output streams');
-        }
-        $pipes = [];
-        $process = @proc_open(
-            $arguments,
-            [0 => ['pipe', 'r'], 1 => $stdoutFile, 2 => $stderrFile],
-            $pipes,
-        );
-        if (!is_resource($process)) {
-            fclose($stdoutFile);
-            fclose($stderrFile);
-            throw new RuntimeException(
-                "Pliego process {$arguments[0]} could not start on ".PHP_OS_FAMILY.'; install it or set PLIEGO_BINARY.',
-            );
-        }
-        fclose($pipes[0]);
-
-        $deadline = hrtime(true) + ($this->timeoutSeconds * 1_000_000_000);
-        $status = proc_get_status($process);
-        while ($status['running']) {
-            if (hrtime(true) >= $deadline) {
-                proc_terminate($process, 9);
-                proc_close($process);
-                fclose($stdoutFile);
-                fclose($stderrFile);
-                throw new RuntimeException("Pliego --version exceeded {$this->timeoutSeconds} seconds");
-            }
-            usleep(10_000);
-            $status = proc_get_status($process);
-        }
-        $exitCode = $status['exitcode'];
-        $closedExitCode = proc_close($process);
-        if ($exitCode < 0) {
-            $exitCode = $closedExitCode;
-        }
-        rewind($stdoutFile);
-        rewind($stderrFile);
-        $stdout = stream_get_contents($stdoutFile);
-        $stderr = stream_get_contents($stderrFile);
-        fclose($stdoutFile);
-        fclose($stderrFile);
-
-        return [$exitCode, $stdout === false ? '' : $stdout, $stderr === false ? '' : $stderr];
-    }
-
-    private function isAbsolutePath(string $path): bool
-    {
-        return str_starts_with($path, '/')
-            || str_starts_with($path, '\\\\')
-            || preg_match('/^[A-Za-z]:[\\\\\/]/', $path) === 1;
-    }
-
-    private function samePath(string $left, string $right): bool
-    {
-        return DIRECTORY_SEPARATOR === '\\' ? strcasecmp($left, $right) === 0 : $left === $right;
     }
 }

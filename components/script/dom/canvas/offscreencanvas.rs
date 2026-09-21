@@ -86,6 +86,7 @@ impl OffscreenCanvas {
         height: u64,
         placeholder: Option<WeakRef<HTMLCanvasElement>>,
     ) -> DomRoot<OffscreenCanvas> {
+        global.mark_controlled_capture_offscreen_canvas_used();
         reflect_dom_object_with_proto_and_cx(
             Box::new(OffscreenCanvas::new_inherited(width, height, placeholder)),
             global,

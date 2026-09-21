@@ -270,6 +270,10 @@ impl AssetStore {
         self.assets.get(url.as_str())
     }
 
+    pub(crate) fn manifest_path(&self) -> &Path {
+        &self.manifest
+    }
+
     pub fn artifact(&self) -> serde_json::Value {
         serde_json::json!({
             "schema": MANIFEST_SCHEMA,

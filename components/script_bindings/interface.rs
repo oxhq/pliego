@@ -10,7 +10,9 @@ use std::ptr::{self, NonNull};
 
 use js::error::throw_type_error;
 use js::glue::UncheckedUnwrapObject;
-use js::jsapi::JS::CompartmentIterResult;
+use js::jsapi::JS::{
+    CompartmentIterResult, RTPCallerTypeToken, SetRealmReduceTimerPrecisionCallerType,
+};
 use js::jsapi::{
     CallArgs, CheckedUnwrapStatic, Compartment, CompartmentSpecifier, GetNonCCWObjectGlobal,
     GetRealmGlobalOrNull, HandleObject as RawHandleObject, IsSharableCompartment,
@@ -20,7 +22,7 @@ use js::jsapi::{
     ObjectOps, OnNewGlobalHookOption, SymbolCode, TrueHandleValue, Value, jsid,
 };
 use js::jsval::{JSVal, NullValue, PrivateValue};
-use js::realm::AutoRealm;
+use js::realm::{AutoRealm, CurrentRealm};
 use js::rust::wrappers2::{
     GetWellKnownSymbol, JS_AtomizeAndPinString, JS_DefineProperty, JS_DefineProperty3,
     JS_DefineProperty4, JS_DefineProperty5, JS_DefinePropertyById5, JS_FireOnNewGlobalObject,
@@ -188,6 +190,16 @@ pub(crate) unsafe fn create_global_object<D: DomTypes>(
 
     let mut cx = AutoRealm::new_from_handle(cx, rval.handle());
     let cx = &mut cx;
+
+    // Servo installs one SpiderMonkey time callback for JavaScript Date. SpiderMonkey requires
+    // every subsequently-created realm to carry a caller token whenever that callback is set.
+    {
+        let realm = CurrentRealm::assert(cx);
+        SetRealmReduceTimerPrecisionCallerType(
+            realm.realm().as_ptr(),
+            RTPCallerTypeToken { value: 0 },
+        );
+    }
 
     JS_FireOnNewGlobalObject(cx, rval.handle());
 }
