@@ -95,8 +95,10 @@ pub enum PaintMessage {
     SetThrottled(WebViewId, PipelineId, bool),
     /// WebRender has produced a new frame. This message informs `Paint` that
     /// the frame is ready. It contains a bool to indicate if it needs to composite, the
-    /// `DocumentId` of the new frame and the `PainterId` of the associated painter.
-    NewWebRenderFrameReady(PainterId, DocumentId, bool),
+    /// `DocumentId` of the new frame, its exact WebRender publish generation, and the `PainterId`
+    /// of the associated painter. The generation is transported as its documented `u64`
+    /// representation because `FramePublishId` is not serializable.
+    NewWebRenderFrameReady(PainterId, DocumentId, u64, bool),
     /// Script or the Constellation is notifying the renderer that a Pipeline has finished
     /// shutting down. The renderer will not discard the Pipeline until both report that
     /// they have fully shut it down, to avoid recreating it due to any subsequent

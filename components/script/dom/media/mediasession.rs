@@ -73,6 +73,14 @@ impl MediaSession {
         self.media_instance.set(Some(media_instance));
     }
 
+    /// Exact number of explicitly registered action handlers.
+    ///
+    /// A bare MediaSession is inert for capture. Default actions require a live media element,
+    /// whose authoritative Document owner tracker already blocks generation capture separately.
+    pub(crate) fn controlled_capture_action_handler_count(&self) -> usize {
+        self.action_handlers.borrow().0.len()
+    }
+
     pub(crate) fn handle_action(
         &self,
         cx: &mut js::context::JSContext,

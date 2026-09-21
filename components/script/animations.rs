@@ -7,7 +7,10 @@
 use std::cell::Cell;
 
 use cssparser::ToCss;
-use embedder_traits::{AnimationState as AnimationsPresentState, UntrustedNodeAddress};
+use embedder_traits::{
+    AnimationState as AnimationsPresentState, DocumentCssAnimationState, DocumentCssIterationState,
+    DocumentSettlementSource, UntrustedNodeAddress,
+};
 use libc::c_void;
 use rustc_hash::{FxHashMap, FxHashSet};
 use script_bindings::cell::DomRefCell;
@@ -20,6 +23,8 @@ use style::animation::{
 };
 use style::dom::OpaqueNode;
 use style::selector_parser::PseudoElement;
+use style_traits::ToCss as _;
+use timers::DocumentTime;
 
 use crate::dom::animationevent::AnimationEvent;
 use crate::dom::bindings::codegen::Bindings::AnimationEventBinding::AnimationEventInit;
@@ -67,6 +72,73 @@ impl Animations {
             pending_events: Default::default(),
             timeline_value_at_last_dirty: Cell::new(0.0),
         }
+    }
+
+    /// Capture every retained CSS animation and transition with full node/pseudo/slot identity.
+    ///
+    /// Hash-map iteration order is intentionally discarded by the canonical source snapshot in
+    /// the embedding protocol. We retain vector slots because names and properties may repeat.
+    pub(crate) fn controlled_settlement_sources(
+        &self,
+        pipeline_id: PipelineId,
+        timeline_now: f64,
+        document_now: DocumentTime,
+    ) -> Vec<DocumentSettlementSource> {
+        let sets = self.sets.sets.read();
+        let mut sources = Vec::new();
+        for (key, set) in sets.iter() {
+            let node_id = key.node.id();
+            let pseudo_element = key
+                .pseudo_element
+                .as_ref()
+                .map(|pseudo| u16::try_from(pseudo.index()).expect("pseudo index exceeds u16"));
+            for (slot, animation) in set.animations.iter().enumerate() {
+                let state = controlled_animation_state(&animation.state);
+                let iteration = match &animation.iteration_state {
+                    KeyframesIterationState::Finite(current, max) => {
+                        DocumentCssIterationState::Finite {
+                            current_bits: current.to_bits(),
+                            max_bits: max.to_bits(),
+                        }
+                    },
+                    KeyframesIterationState::Infinite(current) => {
+                        DocumentCssIterationState::Infinite {
+                            current_bits: current.to_bits(),
+                        }
+                    },
+                };
+                sources.push(DocumentSettlementSource::css_animation_internal(
+                    pipeline_id,
+                    node_id,
+                    pseudo_element,
+                    u64::try_from(slot).expect("CSS animation slot exceeds u64"),
+                    animation.name.to_string(),
+                    state,
+                    iteration,
+                    animation.started_at,
+                    animation.duration,
+                    animation.delay,
+                    timeline_now,
+                    document_now,
+                ));
+            }
+            for (slot, transition) in set.transitions.iter().enumerate() {
+                sources.push(DocumentSettlementSource::css_transition_internal(
+                    pipeline_id,
+                    node_id,
+                    pseudo_element,
+                    u64::try_from(slot).expect("CSS transition slot exceeds u64"),
+                    transition.property_animation.property_id().to_css_string(),
+                    controlled_animation_state(&transition.state),
+                    transition.start_time,
+                    transition.property_animation.duration,
+                    transition.delay,
+                    timeline_now,
+                    document_now,
+                ));
+            }
+        }
+        sources
     }
 
     pub(crate) fn clear(&self) {
@@ -560,6 +632,16 @@ impl Animations {
         if self.pending_events.borrow().is_empty() {
             self.handle_animation_presence_or_pending_events_change(window);
         }
+    }
+}
+
+fn controlled_animation_state(state: &AnimationState) -> DocumentCssAnimationState {
+    match state {
+        AnimationState::Pending => DocumentCssAnimationState::Pending,
+        AnimationState::Running => DocumentCssAnimationState::Running,
+        AnimationState::Paused(progress) => DocumentCssAnimationState::Paused(progress.to_bits()),
+        AnimationState::Finished => DocumentCssAnimationState::Finished,
+        AnimationState::Canceled => DocumentCssAnimationState::Canceled,
     }
 }
 

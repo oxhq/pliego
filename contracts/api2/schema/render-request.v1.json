@@ -67,7 +67,7 @@
         "path": { "const": "input-manifest.json" },
         "media_type": { "const": "application/vnd.pliego.input-manifest+json" },
         "sha256": { "$ref": "#/definitions/content_address" },
-        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 }
       }
     },
     "input": {
@@ -91,7 +91,7 @@
     "page": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["size", "margins_app_units", "css_page_precedence"],
+      "required": ["size", "margins_app_units", "geometry_authority"],
       "properties": {
         "size": {
           "oneOf": [
@@ -100,7 +100,7 @@
           ]
         },
         "margins_app_units": { "$ref": "#/definitions/margins" },
-        "css_page_precedence": { "const": "css-page-over-request-defaults" }
+        "geometry_authority": { "const": "request-only-v1" }
       }
     },
     "named_page_size": {
@@ -163,8 +163,6 @@
         "microtasks",
         "rendering_opportunities",
         "mutations",
-        "post_readiness_resources",
-        "process_cpu_ms",
         "host_wall_ms"
       ],
       "properties": {
@@ -173,8 +171,6 @@
         "microtasks": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
         "rendering_opportunities": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
         "mutations": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
-        "post_readiness_resources": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "process_cpu_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
         "host_wall_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
       }
     },

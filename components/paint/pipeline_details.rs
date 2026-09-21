@@ -60,6 +60,10 @@ pub(crate) struct PipelineDetails {
     /// display list has been received.
     pub display_list_epoch: Option<Epoch>,
 
+    /// Epoch of the latest display list Paint actually received. Unlike
+    /// [`Self::display_list_epoch`], this is never advanced by `UpdateEpoch`.
+    pub actual_display_list_epoch: Option<Epoch>,
+
     /// Paint-driven animations associated with this [`PipelineDetails`]. Currently only text caret
     /// is handled this way.
     ///
@@ -94,6 +98,7 @@ impl PipelineDetails {
             largest_contentful_paint_metric: Cell::new(PaintMetricState::Waiting),
             exited: PipelineExitSource::empty(),
             display_list_epoch: None,
+            actual_display_list_epoch: None,
             animations: Default::default(),
         }
     }

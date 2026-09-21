@@ -4,61 +4,84 @@ Pliego is an open-source native HTML-to-PDF engine built on Servo for
 application-owned invoices, statements, and operational reports. It turns HTML and
 CSS into paginated PDFs without Chromium, Node.js, or Java in the runtime.
 
-Pliego focuses on predictable document workflows:
+**Current stable line:** Pliego 0.3 / API 2. **Recommended build:** v0.3.3.
+
+Pliego focuses on document workflows whose inputs and failure boundaries can be made
+explicit:
 
 - authored page breaks, paged tables, repeated headers, and row constraints;
-- selectable text, links, and embedded TTF, OTF, WOFF, and WOFF2 fonts;
-- network-denied rendering by default, with explicit URL allowlists for remote
-  stylesheets, images, and fonts;
+- selectable text and embedded TTF, OTF, WOFF, and WOFF2 fonts;
+- an offline API 2 input closure containing the exact authorized stylesheets,
+  images, scripts, and fonts;
 - typed failures and retained input, resource, scene, PDF, and diagnostic artifacts;
   and
 - native bundles for Linux x86_64, Windows x86_64, macOS x86_64, and macOS arm64.
 
 ## Rendered output
 
-These are exact PDF responses from a Laravel application running Pliego v0.1.1.
-The operating report draws Chart.js 4.5.1, signals readiness after the final
-canvas readback, and then renders to PDF. The invoice exercises embedded fonts,
-an authored page break, a dense 20-row ledger, and calculated totals.
+These are exact outputs from the published Pliego v0.3.2 Linux bundle using API 2.
+The operating report exercises selectable text, an embedded WOFF2 font, fixed-width
+tables, and deterministic page geometry. The invoice adds an authored page break,
+line items, calculated totals, and a terms page. Exact input, request,
+runtime, and artifact hashes are retained in the
+[showcase manifest](docs/pliego/showcase/manifest.json).
 
-[![Chart.js operating report rendered by Pliego](docs/pliego/showcase/chartjs-report.png)](docs/pliego/showcase/chartjs-report.pdf)
+[![Operating report rendered by Pliego](docs/pliego/showcase/operating-report.png)](docs/pliego/showcase/operating-report.pdf)
 
-- [Chart.js operating report (PDF, one page)](docs/pliego/showcase/chartjs-report.pdf)
+- [Operating report (PDF, one page)](docs/pliego/showcase/operating-report.pdf)
 - [Styled invoice (PDF, two pages)](docs/pliego/showcase/invoice.pdf)
 
-## Laravel quick start
+## Laravel in five minutes
+
+The Laravel package installs the exact PHP bridge and downloads the package-pinned
+native runtime:
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0
+composer require oxhq/pliego-laravel:^0.3.3
 php artisan pliego:install
 php artisan pliego:doctor
 ```
 
-The default render path is:
+For a business document that must outlive Pliego's prunable retained job, render once
+and stream the validated PDF into Laravel Storage:
 
 ```php
+use Illuminate\Support\Facades\Storage;
 use Pliego\Laravel\Facades\Document;
 
-return Document::view('invoice', compact('rows'))->download();
+$stored = Document::view('invoice', ['rows' => $rows])->store(
+    path: 'invoices/42.pdf',
+    disk: 'local',
+);
+
+return Storage::disk($stored->disk)->download(
+    $stored->path,
+    'invoice.pdf',
+);
 ```
 
-The defaults cover the common local document path. Add policy and document options
-only when the view needs them:
+Pliego opens the validated PDF as a stream and passes it to Laravel Storage instead
+of reading the complete PDF into a PHP string. The configured filesystem adapter
+owns downstream buffering. `store()` returns the durable disk and path together with
+the underlying render identity and retained evidence. A storage failure is distinct
+from a render failure and is never reported as a stored document.
+
+For a direct HTTP response that does not need durable application storage:
 
 ```php
 use Pliego\Laravel\Facades\Document;
 
 return Document::view('invoices.show', ['invoice' => $invoice])
     ->locale('es-MX')
-    ->timezone('PST8PDT')
-    ->denyNetwork()
+    ->timezone('America/Tijuana')
     ->asset('fonts/invoice.woff2', resource_path('fonts/invoice.woff2'))
     ->download('invoice.pdf');
 ```
 
 Static Blade views need no readiness calls. Pliego infers readiness after page load
-and waits for `document.fonts.ready`. Call `defer()` only when JavaScript will keep
-changing the document or a canvas after load, then finish with `ready()` or `fail()`:
+and waits for `document.fonts.ready`. Call `defer()` only when JavaScript keeps
+changing the document or a canvas after load, then finish with `ready()` or
+`fail()`:
 
 ```html
 <script>
@@ -70,73 +93,107 @@ loadReportData()
 </script>
 ```
 
-Chart.js 4.5.1 is covered for a deterministic, non-animated chart that performs a
-synchronous full-canvas `getImageData(0, 0, canvas.width, canvas.height)` readback
-after its final draw. Pliego retains those pixels as the authoritative canvas
-result; this does not imply compatibility with every Chart.js mode or Canvas API.
-
-The current PDF paint boundary retains resolved sRGB text colors, solid
-backgrounds, uniform-color sharp axis-aligned solid borders, and uniform solid
-collapsed-table borders. CSS gradients and background-image layers, box and text
-shadows, text decorations, rounded or mixed-color borders, clips, non-solid and
-image borders, transforms, opacity, filters, and blend modes are explicitly
-unsupported and reported instead of approximated. Default rendering fails without
-publishing a partial PDF; `--allow-partial-scene` is only for retained diagnostics.
-See the [support profile](docs/pliego/support-profile.md) for the complete boundary.
-
-`download()` returns a Laravel file response. Use `render()` instead to receive a
-result with the PDF, input-bundle, and retained-artifact paths.
+API 2 never fetches live network resources or discovers host fonts. Fetch reviewed
+remote resources in the application, then provide their exact bytes with `asset()`.
+The [support profile](docs/pliego/support-profile.md) distinguishes the broader
+controlled-capture regression corpus from the narrower operations that v0.3.3 API 2
+can encode and publish exactly.
 
 Ubuntu 22.04 x86_64 needs `ca-certificates`, `libfontconfig1`, `libegl1`, and
 `libgl1-mesa-dri`. Headless containers also need a writable mode-0700
-`XDG_RUNTIME_DIR`; no display server or Xvfb is required.
-Windows x64 requires the latest
-[Microsoft Visual C++ v14 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170).
-macOS Intel and Apple Silicon bundles require macOS 13 or newer. The Intel
-binary is unsigned and Apple Silicon is ad-hoc signed; neither is Developer ID
-signed or notarized.
+`XDG_RUNTIME_DIR`; no display server or Xvfb is required. Windows x64 requires the
+latest [Microsoft Visual C++ v14 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170).
+macOS Intel and Apple Silicon bundles require macOS 13 or newer. The Intel binary is
+unsigned and Apple Silicon is ad-hoc signed; neither is Developer ID signed or
+notarized.
 
-`pliego:install` downloads the package-pinned runtime for the current platform and
-verifies its size and SHA-256 before installation. `pliego:doctor` checks the engine
-API, writable storage, bundled font, and an offline PDF render.
+`pliego:install` verifies the runtime size and SHA-256 before installation.
+`pliego:doctor` checks API negotiation, writable storage, the bundled font, and an
+offline PDF render. See the [Laravel package guide](sdk/laravel/README.md) for asset
+materialization, queues, durable storage, typed failures, and retention.
 
-Network access remains opt-in. A Google Fonts stylesheet needs explicit roots for
-both `https://fonts.googleapis.com/` and `https://fonts.gstatic.com/s/`.
+## Versioned native engine
 
-See the [Laravel package guide](sdk/laravel/README.md) for Blade rendering, local
-assets, controlled URLs, typed failures, and artifact retention.
-
-## Native CLI
-
-Download a bundle from [Releases](https://github.com/oxhq/pliego/releases), verify
-its adjacent SHA-256 file, and run:
+Native integrations should discover the contract rather than infer it from a
+version string:
 
 ```sh
-pliego render document.html --output document.pdf --artifacts artifacts
+pliego --contract-probe
 ```
 
-Host-font fallback, network access, redirects, and asset caching are disabled by
-default. Partial scene capture also fails before the requested output is published.
-The [support profile](docs/pliego/support-profile.md) defines the current
-capability, resource, and failure boundaries.
+Pliego 0.3 advertises one profile-null API 2 tuple: input manifest v1, render request
+v1, render result v1, DocumentScene v2, and bundle manifest v1. `render-api2`
+accepts one canonical request on stdin from an exclusive cwd-v1 job root and returns
+one terminal result plus a hash-bound delivery closure. The PHP and Laravel packages
+build that closure, negotiate the exact tuple, and verify the result.
 
-## Release evidence
+The API 1 `pliego render` route remains only as a deprecated migration boundary.
+New integrations should not build against it. See
+[ADR 0018](docs/pliego/adr/0018-api-2-contract-and-public-artifacts.md) for the wire
+contract and the [support profile](docs/pliego/support-profile.md) for the remaining
+API 1 compatibility details.
+
+Semantic and accessible-PDF profiles are deliberately unadvertised until their
+separate release and evidence gates are satisfied.
+
+Link annotations are also outside the advertised v0.3.3 API 2 profile. Inputs that
+produce a link operation without exact fixed-point authority fail closed with
+`SCENE_ENCODING_FAILED`; no PDF is delivered.
+
+## Benchmark evidence
+
+<!-- pliego-hosted-benchmark:start -->
+The published `minimal-static` snapshot measures the released Pliego v0.3.3 bundle and the
+version-locked adapter dependency graphs for dompdf 3.1.6 and Browsershot 5.4.0 with Puppeteer
+25.8.0. Every displayed value comes from the sealed three-repeat series; the table shows each
+fresh VM's p50 wall time and the complete between-run range.
+
+| Renderer | Repeat 1 p50 (ms) | Repeat 2 p50 (ms) | Repeat 3 p50 (ms) | p50 range (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Browsershot 5.4.0 + Puppeteer 25.8.0 (cold Chromium adapter) | 1117.57 | 947.887 | 879.863 | 879.863 to 1117.57 |
+| dompdf 3.1.6 (cold Composer adapter) | 531.282 | 330.605 | 313.688 | 313.688 to 531.282 |
+| Pliego 0.3.3 (published API 2 bundle) | 558.748 | 558.546 | 447.58 | 447.58 to 558.748 |
+
+Browsershot's Node/Chromium generic temporary storage uses a disclosed private tmpfs `TMPDIR`; it remains charged to cgroup memory but is outside block-device I/O. Its PHP `TMPDIR`, HOME/XDG roots, explicit Chromium profile, artifacts, and PDF remain on measured ext4. This target-specific storage accommodation can affect wall time; see the methodology.
+
+All 900 timed samples passed the shared PDF oracle. Three correctness-gated repeats on GitHub-hosted VMs; repeat-to-repeat spread is retained, no best or canonical repeat is selected, and the series is not dedicated-host evidence or a general production-performance ranking.
+
+[Full comparative aggregate report and spread](docs/benchmarks/results/v0.3.3-minimal-static-github-hosted/all-repeats.md) · [Immutable evidence release](https://github.com/oxhq/pliego/releases/tag/benchmark-v0.3.3-minimal-static-gh-33243607869-a1)
+
+Authoritative tables and production rankings remain N/A until the stricter dedicated-host,
+immutable-runtime, and canonical-oracle gates pass. Read the exact boundary and reproduction
+commands in the [benchmark methodology](docs/benchmarks/README.md).
+<!-- pliego-hosted-benchmark:end -->
+
+## Release evidence and limits
 
 Native bundles are built and API-smoked on all four targets in the
-[package matrix](https://github.com/oxhq/pliego/actions/workflows/pliego-package.yml). The
-[PHP package](https://packagist.org/packages/oxhq/pliego-php) and
-[Laravel package](https://packagist.org/packages/oxhq/pliego-laravel) are available
+[package matrix](https://github.com/oxhq/pliego/actions/workflows/pliego-package.yml).
+The [PHP package](https://packagist.org/packages/oxhq/pliego-php) and
+[Laravel package](https://packagist.org/packages/oxhq/pliego-laravel) are published
 on Packagist and pass focused hosted package checks.
 
-These checks prove the packaged binaries start with the expected engine API and the
-Composer distributions pass their focused contracts. The support profile remains
-the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
-untrusted HTML.
+These checks prove release mechanics and the declared fixture boundary. Pliego does
+not claim browser-wide compatibility, safe rendering of hostile HTML, PDF/UA,
+cross-platform byte determinism, or performance leadership. The latest exact tag and
+native assets on [GitHub Releases](https://github.com/oxhq/pliego/releases/latest)
+are the publication authority.
 
-Every native archive includes the project and specification licenses, an exact tagged
-source pointer, the generated Cargo dependency report, and pinned notices for copied
-or linked native code. Windows archives additionally inventory their ANGLE DLLs and
-the exact mozangle, Chromium, Khronos/Vulkan, Bison, and zlib notices they require.
+Read the [Pliego 0.3 launch overview](docs/releases/v0.3.md), then use:
+
+- [Project overview](docs/project-overview.md)
+- [Roadmap](ROADMAP.md)
+- [Support profile](docs/pliego/support-profile.md)
+- [Security threat model](docs/security/threat-model.md)
+- [2026 funding plan](docs/funding/2026.md)
+
+## Evaluate Pliego on a real document
+
+We are looking for PHP/Laravel teams willing to evaluate v0.3.3 against one
+application-owned invoice, statement, or operational-report family. Share the
+platform, deployment shape, install/doctor outcome, and retained failure kind—but
+never confidential HTML or retained artifacts—in
+[GitHub Discussions](https://github.com/oxhq/pliego/discussions).
 
 ## Building from source
 
@@ -145,15 +202,15 @@ the exact mozangle, Chromium, Khronos/Vulkan, Bison, and zlib notices they requi
 cargo build -p pliego --locked --profile checked-release
 ```
 
-On Windows, run `./mach` as `./mach.bat` or `python mach` from a configured Servo
-build environment.
+On Windows, run `./mach` as `./mach.bat` or `python mach` from a configured
+Servo build environment.
 
 ## Servo relationship
 
 Pliego preserves Servo's source layout so upstream security and web-platform fixes
 can be reviewed without rewriting the fork. The `upstream-main` branch mirrors
-Servo `main`; temporary `sync/servo-YYYY-MM-DD` branches carry reviewed updates into
-Pliego. Servo build documentation remains available in the
+Servo `main`; temporary `sync/servo-YYYY-MM-DD` branches carry reviewed updates
+into Pliego. Servo build documentation remains available in the
 [Servo Book](https://book.servo.org/).
 
 ## License and contributing

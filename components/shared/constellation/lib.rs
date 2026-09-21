@@ -19,9 +19,10 @@ use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
 };
 use embedder_traits::{
-    EmbedderControlId, EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId,
-    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
-    ViewportDetails, WebDriverCommandMsg,
+    DocumentClockConfiguration, DocumentTimeControlCancellationId, DocumentTimeControlCommand,
+    DocumentTimeControlOutcome, EmbedderControlId, EmbedderControlResponse, InputEventAndId,
+    JavaScriptEvaluationId, MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme,
+    TraversalId, UrlRequest, ViewportDetails, WebDriverCommandMsg,
 };
 pub use from_script_message::*;
 use malloc_size_of_derive::MallocSizeOf;
@@ -101,6 +102,13 @@ pub enum EmbedderToConstellationMessage {
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
     /// Return the cached layout debug snapshot for the active document in a `WebView`.
     RequestLayoutDebugSnapshot(WebViewId, GenericCallback<Option<String>>),
+    /// Mechanically drive or observe one opt-in controlled document event loop.
+    ControlDocumentTime(
+        WebViewId,
+        DocumentTimeControlCancellationId,
+        DocumentTimeControlCommand,
+        GenericCallback<DocumentTimeControlOutcome>,
+    ),
     /// Create a memory report and return it via the [`GenericCallback`]
     CreateMemoryReport(GenericCallback<MemoryReportResult>),
     /// Sends the generated image key to the image cache associated with this pipeline.
@@ -118,6 +126,15 @@ pub enum EmbedderToConstellationMessage {
     UpdatePinchZoomInfos(PipelineId, PinchZoomInfos),
     /// Activate or deactivate accessibility features for the given `WebView`.
     SetAccessibilityActive(WebViewId, bool),
+    /// Create a top-level WebView with an internal document-clock configuration.
+    ///
+    /// This appended route preserves the source and wire shape of the legacy
+    /// [`NewWebView`](Self::NewWebView) payload, whose public details remain realtime.
+    #[doc(hidden)]
+    NewWebViewWithDocumentClock(ServoUrl, NewWebViewDetails, DocumentClockConfiguration),
+    /// Abandon response tracking for one exact controlled document-time request.
+    #[doc(hidden)]
+    CancelDocumentTimeControl(WebViewId, DocumentTimeControlCancellationId),
 }
 
 pub enum UserContentManagerAction {
@@ -128,12 +145,21 @@ pub enum UserContentManagerAction {
     RemoveUserStyleSheet(UserStyleSheetId),
 }
 
+/// The clock domain which produced a paint-metric timestamp.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PaintMetricTime {
+    /// An ordinary realtime rendering timestamp.
+    Host(CrossProcessInstant),
+    /// Exact nanoseconds in the controlled document's clock domain.
+    Document(u128),
+}
+
 /// A description of a paint metric that is sent from the Servo renderer to the
 /// constellation.
 pub enum PaintMetricEvent {
-    FirstPaint(CrossProcessInstant, bool /* first_reflow */),
-    FirstContentfulPaint(CrossProcessInstant, bool /* first_reflow */),
-    LargestContentfulPaint(CrossProcessInstant, usize /* area */, Option<ServoUrl>),
+    FirstPaint(PaintMetricTime, bool /* first_reflow */),
+    FirstContentfulPaint(PaintMetricTime, bool /* first_reflow */),
+    LargestContentfulPaint(PaintMetricTime, usize /* area */, Option<ServoUrl>),
 }
 
 impl fmt::Debug for EmbedderToConstellationMessage {

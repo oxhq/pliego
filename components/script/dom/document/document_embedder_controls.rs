@@ -96,6 +96,11 @@ impl DocumentEmbedderControls {
         }
     }
 
+    /// Exact number of controls whose embedder/file-manager response remains outstanding.
+    pub(crate) fn controlled_capture_visible_count(&self) -> usize {
+        self.visible_elements.borrow().len()
+    }
+
     pub(crate) fn show_embedder_control(
         &self,
         element: ControlElement,
@@ -122,24 +127,39 @@ impl DocumentEmbedderControls {
                 DeviceIntRect::from_untyped(&rect.to_box2d())
             });
 
-        self.visible_elements
-            .borrow_mut()
-            .insert(id.index.into(), element);
-
         match request {
             EmbedderControlRequest::SelectElement(..) |
             EmbedderControlRequest::ColorPicker(..) |
             EmbedderControlRequest::InputMethod(..) |
-            EmbedderControlRequest::ContextMenu(..) => self
-                .window
-                .send_to_embedder(EmbedderMsg::ShowEmbedderControl(id, rect, request)),
+            EmbedderControlRequest::ContextMenu(..) => {
+                self.visible_elements
+                    .borrow_mut()
+                    .insert(id.index.into(), element);
+                if let Err(error) = self
+                    .window
+                    .as_global_scope()
+                    .script_to_embedder_chan()
+                    .send(EmbedderMsg::ShowEmbedderControl(id, rect, request))
+                {
+                    // A failed outbound request cannot leave a live source with no possible
+                    // response. Remove it synchronously before returning to script.
+                    self.visible_elements.borrow_mut().remove(&id.index.into());
+                    warn!("Could not show embedder control: {error:?}");
+                }
+            },
             EmbedderControlRequest::FilePicker(file_picker_request) => {
                 let main_thread_sender = self.window.main_thread_script_chan().clone();
                 let callback = profile_traits::generic_callback::GenericCallback::new(
                     self.window.as_global_scope().time_profiler_chan().clone(),
                     move |result| {
-                        let Ok(embedder_control_response) = result else {
-                            return;
+                        let embedder_control_response = match result {
+                            Ok(response) => response,
+                            Err(error) => {
+                                warn!("FileManager callback failed: {error:?}");
+                                // Treat transport failure exactly like a cancelled picker so the
+                                // main thread consumes and clears the visible-control source.
+                                EmbedderControlResponse::FilePicker(None)
+                            },
                         };
                         if let Err(error) = main_thread_sender.send(
                             MainThreadScriptMsg::ForwardEmbedderControlResponseFromFileManager(
@@ -152,14 +172,22 @@ impl DocumentEmbedderControls {
                     },
                 )
                 .expect("Could not create callback");
-                self.window
+                self.visible_elements
+                    .borrow_mut()
+                    .insert(id.index.into(), element);
+                if let Err(error) = self
+                    .window
                     .as_global_scope()
                     .resource_threads()
                     .sender()
                     .send(CoreResourceMsg::ToFileManager(
                         FileManagerThreadMsg::SelectFiles(id, file_picker_request, callback),
                     ))
-                    .unwrap();
+                {
+                    // The callback was never delivered, so no response can clear this entry.
+                    self.visible_elements.borrow_mut().remove(&id.index.into());
+                    warn!("Could not request FileManager picker: {error:?}");
+                }
             },
         }
 

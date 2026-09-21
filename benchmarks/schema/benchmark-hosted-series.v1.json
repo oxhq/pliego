@@ -1,0 +1,353 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-hosted-series.v1.json",
+  "title": "Pliego GitHub-hosted benchmark series",
+  "description": "A sealed no-selection summary of exactly three correctness-gated GitHub-hosted comparison repeats.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "evidence_class",
+    "publication_status",
+    "selection_policy",
+    "claim_boundary",
+    "series_sha256",
+    "generated_at",
+    "source",
+    "runner_image",
+    "fixture",
+    "protocol",
+    "oracle",
+    "targets",
+    "runs",
+    "summary"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.benchmark-hosted-series" },
+    "version": { "const": 1 },
+    "evidence_class": { "const": "github-hosted-exploratory" },
+    "publication_status": { "const": "hosted-series" },
+    "selection_policy": { "const": "all-repeats-no-selection" },
+    "claim_boundary": {
+      "const": "Three correctness-gated repeats on GitHub-hosted VMs; repeat-to-repeat spread is retained, no best or canonical repeat is selected, and the series is not dedicated-host evidence or a general production-performance ranking."
+    },
+    "series_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "generated_at": { "type": "string", "minLength": 1 },
+    "source": { "$ref": "#/definitions/source" },
+    "runner_image": { "$ref": "#/definitions/runner_image" },
+    "fixture": { "$ref": "#/definitions/fixture" },
+    "protocol": { "$ref": "#/definitions/protocol" },
+    "oracle": { "$ref": "#/definitions/oracle" },
+    "targets": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/definitions/target" }
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/definitions/run" }
+    },
+    "summary": { "$ref": "#/definitions/summary" }
+  },
+  "definitions": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "revision",
+        "ref",
+        "event_name",
+        "workflow",
+        "workflow_ref",
+        "job",
+        "run_id",
+        "run_attempt",
+        "run_url"
+      ],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[Oo]x[Hh][Qq]/pliego$" },
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "ref": { "const": "refs/heads/main" },
+        "event_name": { "const": "workflow_dispatch" },
+        "workflow": { "type": "string", "minLength": 1 },
+        "workflow_ref": {
+          "type": "string",
+          "pattern": "^[Oo]x[Hh][Qq]/pliego/\\.github/workflows/pliego-performance\\.yml@refs/heads/main$"
+        },
+        "job": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "integer", "minimum": 1 },
+        "run_attempt": { "type": "integer", "minimum": 1 },
+        "run_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[Oo]x[Hh][Qq]/pliego/actions/runs/[1-9][0-9]*/attempts/[1-9][0-9]*$"
+        }
+      }
+    },
+    "runner_image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_os", "image_version"],
+      "properties": {
+        "image_os": { "type": "string", "minLength": 1 },
+        "image_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "os", "arch", "environment", "image_os", "image_version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "os": { "const": "Linux" },
+        "arch": { "const": "X64" },
+        "environment": { "const": "github-hosted" },
+        "image_os": { "type": "string", "minLength": 1 },
+        "image_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "arch",
+        "kernel",
+        "cpu_model",
+        "cores",
+        "ram_bytes",
+        "dedicated",
+        "uname",
+        "os_release",
+        "lscpu_json",
+        "virtualization",
+        "cgroup"
+      ],
+      "properties": {
+        "os": { "const": "Linux" },
+        "arch": { "const": "x86_64" },
+        "kernel": { "type": "string", "minLength": 1 },
+        "cpu_model": { "type": "string", "minLength": 1 },
+        "cores": { "type": "integer", "minimum": 1 },
+        "ram_bytes": { "type": "integer", "minimum": 1 },
+        "dedicated": { "const": false },
+        "uname": { "type": ["string", "null"] },
+        "os_release": { "type": ["string", "null"] },
+        "lscpu_json": { "type": ["string", "null"] },
+        "virtualization": { "type": ["string", "null"] },
+        "cgroup": { "type": "object" }
+      }
+    },
+    "ambient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before", "after"],
+      "properties": {
+        "before": { "type": "object" },
+        "after": { "type": "object" }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "input", "input_sha256", "bundle_sha256"],
+      "properties": {
+        "id": { "const": "minimal-static" },
+        "input": { "type": "string", "minLength": 1 },
+        "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixture_id",
+        "targets",
+        "correctness_preflight_iterations",
+        "warmup_iterations",
+        "sample_count",
+        "seed",
+        "schedule_contract",
+        "sample_order",
+        "network",
+        "measurement_method",
+        "percentile_method"
+      ],
+      "properties": {
+        "fixture_id": { "const": "minimal-static" },
+        "targets": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "correctness_preflight_iterations": { "const": 1 },
+        "warmup_iterations": { "const": 10 },
+        "sample_count": { "type": "integer", "minimum": 100 },
+        "seed": { "const": 1 },
+        "schedule_contract": { "const": "pliego.cross-target-schedule.v1" },
+        "sample_order": { "const": "globally-interleaved-seeded" },
+        "network": { "const": "private-loopback-only" },
+        "measurement_method": { "const": "linux-cgroup-v2-v1" },
+        "percentile_method": { "const": "nearest-rank-v1" }
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "required": [
+        "contract",
+        "oracle_path",
+        "oracle_sha256",
+        "pdfinfo_path",
+        "pdfinfo_sha256",
+        "pdfinfo_version",
+        "pdftotext_path",
+        "pdftotext_sha256",
+        "pdftotext_version",
+        "pdffonts_path",
+        "pdffonts_sha256",
+        "pdffonts_version",
+        "pdftoppm_path",
+        "pdftoppm_sha256",
+        "pdftoppm_version"
+      ],
+      "properties": {
+        "contract": { "const": "pliego.pdf-oracle.v1" }
+      },
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "engine", "runtime", "identity_sha256"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "engine": { "type": "object" },
+        "runtime": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string" }
+        },
+        "identity_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repeat",
+        "generated_at",
+        "comparison_sha256",
+        "interleaved_artifact_sha256",
+        "schedule_sha256",
+        "runner",
+        "host",
+        "ambient"
+      ],
+      "properties": {
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "generated_at": { "type": "string", "minLength": 1 },
+        "comparison_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "interleaved_artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "schedule_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "runner": { "$ref": "#/definitions/runner" },
+        "host": { "$ref": "#/definitions/host" },
+        "ambient": { "$ref": "#/definitions/ambient" }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "repeats", "targets"],
+      "properties": {
+        "basis": { "const": "three-per-run-p50s" },
+        "repeats": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "integer", "minimum": 1, "maximum": 3 }
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/definitions/target_summary" }
+        }
+      }
+    },
+    "target_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_id", "metrics", "serial_throughput"],
+      "properties": {
+        "target_id": { "type": "string", "minLength": 1 },
+        "metrics": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/definitions/metric_summary" }
+        },
+        "serial_throughput": { "$ref": "#/definitions/throughput_summary" }
+      }
+    },
+    "metric_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "per_repeat", "min", "max", "mean", "relative_spread_percent"],
+      "properties": {
+        "unit": { "type": "string", "minLength": 1 },
+        "per_repeat": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/definitions/metric_repeat" }
+        },
+        "min": { "type": "number", "minimum": 0 },
+        "max": { "type": "number", "minimum": 0 },
+        "mean": { "type": "number", "minimum": 0 },
+        "relative_spread_percent": { "type": "number", "minimum": 0 }
+      }
+    },
+    "metric_repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repeat", "p50"],
+      "properties": {
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "p50": { "type": "number", "minimum": 0 }
+      }
+    },
+    "throughput_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "per_repeat", "min", "max", "mean", "relative_spread_percent"],
+      "properties": {
+        "unit": { "const": "renders/minute" },
+        "per_repeat": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/definitions/throughput_repeat" }
+        },
+        "min": { "type": "number", "minimum": 0 },
+        "max": { "type": "number", "minimum": 0 },
+        "mean": { "type": "number", "minimum": 0 },
+        "relative_spread_percent": { "type": "number", "minimum": 0 }
+      }
+    },
+    "throughput_repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repeat", "renders_per_minute"],
+      "properties": {
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "renders_per_minute": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    }
+  }
+}
