@@ -6,7 +6,14 @@ use paint_api::largest_contentful_paint_candidate::{LCPCandidate, LargestContent
 use rustc_hash::{FxHashMap, FxHashSet};
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::id::WebViewId;
+use servo_constellation_traits::PaintMetricTime;
 use webrender_api::PipelineId;
+
+#[derive(Clone)]
+pub(crate) struct LargestContentfulPaintMetric {
+    pub(crate) paint: LargestContentfulPaint,
+    pub(crate) time: PaintMetricTime,
+}
 
 /// Holds the [`LargestContentfulPaintsContainer`] for each pipeline.
 #[derive(Default)]
@@ -47,12 +54,12 @@ impl LargestContentfulPaintCalculator {
 
     pub(crate) fn calculate_largest_contentful_paint(
         &mut self,
-        paint_time: CrossProcessInstant,
+        metric_time: PaintMetricTime,
         pipeline_id: PipelineId,
-    ) -> Option<LargestContentfulPaint> {
+    ) -> Option<LargestContentfulPaintMetric> {
         self.lcp_containers
             .get_mut(&pipeline_id)
-            .and_then(|container| container.calculate_largest_contentful_paint(paint_time))
+            .and_then(|container| container.calculate_largest_contentful_paint(metric_time))
     }
 
     /// <https://www.w3.org/TR/largest-contentful-paint/#limitations>
@@ -71,33 +78,106 @@ struct LargestContentfulPaintsContainer {
     /// List of candidates for Largest Contentful Paint in this pipeline.
     lcp_candidates: Vec<LCPCandidate>,
     /// The most recent Largest Contentful Paint, if any.
-    latest_lcp: Option<LargestContentfulPaint>,
+    latest_lcp: Option<LargestContentfulPaintMetric>,
 }
 
 impl LargestContentfulPaintsContainer {
     fn calculate_largest_contentful_paint(
         &mut self,
-        paint_time: CrossProcessInstant,
-    ) -> Option<LargestContentfulPaint> {
+        metric_time: PaintMetricTime,
+    ) -> Option<LargestContentfulPaintMetric> {
         if self.lcp_candidates.is_empty() {
             return self.latest_lcp.clone();
         }
 
+        let calculator_time = match metric_time {
+            PaintMetricTime::Host(time) => time,
+            PaintMetricTime::Document(_) => CrossProcessInstant::epoch(),
+        };
         let candidates = std::mem::take(&mut self.lcp_candidates);
         if let Some(max_candidate) = candidates.into_iter().max_by_key(|c| c.area) {
             match self.latest_lcp {
                 None => {
-                    self.latest_lcp = Some(LargestContentfulPaint::from(max_candidate, paint_time));
+                    self.latest_lcp = Some(LargestContentfulPaintMetric {
+                        paint: LargestContentfulPaint::from(max_candidate, calculator_time),
+                        time: metric_time,
+                    });
                 },
                 Some(ref latest_lcp) => {
-                    if max_candidate.area > latest_lcp.area {
-                        self.latest_lcp =
-                            Some(LargestContentfulPaint::from(max_candidate, paint_time));
+                    if max_candidate.area > latest_lcp.paint.area {
+                        self.latest_lcp = Some(LargestContentfulPaintMetric {
+                            paint: LargestContentfulPaint::from(max_candidate, calculator_time),
+                            time: metric_time,
+                        });
                     }
                 },
             }
         }
 
         self.latest_lcp.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use paint_api::largest_contentful_paint_candidate::LCPCandidateID;
+
+    use super::*;
+
+    fn candidate(id: usize, area: usize) -> LCPCandidate {
+        LCPCandidate::new(LCPCandidateID(id), area, None)
+    }
+
+    #[test]
+    fn smaller_host_candidate_retains_the_original_metric_time() {
+        let first_time = CrossProcessInstant::epoch();
+        let later_time = CrossProcessInstant::now();
+        assert_ne!(first_time, later_time);
+        let mut container = LargestContentfulPaintsContainer::default();
+        container.lcp_candidates.push(candidate(1, 100));
+        let first = container
+            .calculate_largest_contentful_paint(PaintMetricTime::Host(first_time))
+            .expect("candidate should produce an LCP metric");
+        container.lcp_candidates.push(candidate(2, 50));
+        let retained = container
+            .calculate_largest_contentful_paint(PaintMetricTime::Host(later_time))
+            .expect("candidate should retain an LCP metric");
+
+        assert_eq!(first.paint.area, 100);
+        assert_eq!(retained.paint.area, 100);
+        assert_eq!(retained.paint.paint_time, first_time);
+        assert_eq!(retained.time, PaintMetricTime::Host(first_time));
+    }
+
+    #[test]
+    fn smaller_document_candidate_retains_the_original_metric_time() {
+        let mut container = LargestContentfulPaintsContainer::default();
+        container.lcp_candidates.push(candidate(1, 100));
+        container
+            .calculate_largest_contentful_paint(PaintMetricTime::Document(10))
+            .expect("candidate should produce an LCP metric");
+        container.lcp_candidates.push(candidate(2, 50));
+        let retained = container
+            .calculate_largest_contentful_paint(PaintMetricTime::Document(20))
+            .expect("candidate should retain an LCP metric");
+
+        assert_eq!(retained.paint.area, 100);
+        assert_eq!(retained.time, PaintMetricTime::Document(10));
+    }
+
+    #[test]
+    fn larger_candidate_replaces_area_and_metric_time() {
+        let mut container = LargestContentfulPaintsContainer::default();
+        container.lcp_candidates.push(candidate(1, 100));
+        container
+            .calculate_largest_contentful_paint(PaintMetricTime::Document(10))
+            .expect("candidate should produce an LCP metric");
+        container.lcp_candidates.push(candidate(2, 200));
+        let replaced = container
+            .calculate_largest_contentful_paint(PaintMetricTime::Document(20))
+            .expect("larger candidate should replace the LCP metric");
+
+        assert_eq!(replaced.paint.area, 200);
+        assert_eq!(replaced.time, PaintMetricTime::Document(20));
     }
 }

@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "benchmarks" / "fixtures"
 
-# Counts are pinned against the published Linux 0.1.1 renderer.
+# Counts were pinned on Linux v0.1.1 and revalidated unchanged on published v0.2.0.
 LEDGER_ROWS = 250
 STATEMENT_ROWS = 1300
 FONT_IMAGE_PAGES = 6

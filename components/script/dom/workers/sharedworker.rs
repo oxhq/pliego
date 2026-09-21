@@ -17,6 +17,7 @@ use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
 use servo_base::generic_channel;
 use servo_constellation_traits::{MessagePortImpl, WorkerScriptLoadOrigin};
 use servo_url::{Host, ImmutableOrigin, ServoUrl};
+use timers::DocumentTimeSurface;
 use uuid::Uuid;
 
 use crate::conversions::Convert;
@@ -402,6 +403,10 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
         options: StringOrSharedWorkerOptions,
     ) -> Fallible<DomRoot<SharedWorker>> {
         let global = window.upcast::<GlobalScope>();
+        global
+            .document_clock()
+            .require_surface(DocumentTimeSurface::Worker)
+            .map_err(|error| Error::NotSupported(Some(error.to_string())))?;
 
         // Step 1. Let compliantScriptURL be the result of invoking the get trusted type
         // compliant string algorithm with TrustedScriptURL, this's relevant global object,

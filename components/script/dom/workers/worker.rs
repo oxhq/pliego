@@ -18,6 +18,7 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
 use servo_base::generic_channel;
 use servo_constellation_traits::{StructuredSerializedData, WorkerScriptLoadOrigin};
+use timers::DocumentTimeSurface;
 use uuid::Uuid;
 
 use crate::dom::abstractworker::{MessageData, SimpleWorkerErrorHandler, WorkerScriptMsg};
@@ -166,6 +167,11 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
         script_url: TrustedScriptURLOrUSVString,
         worker_options: &WorkerOptions,
     ) -> Fallible<DomRoot<Worker>> {
+        global
+            .document_clock()
+            .require_surface(DocumentTimeSurface::Worker)
+            .map_err(|error| Error::NotSupported(Some(error.to_string())))?;
+
         // Step 1: Let compliantScriptURL be the result of invoking the
         // Get Trusted Type compliant string algorithm with TrustedScriptURL,
         // this's relevant global object, scriptURL, "Worker constructor", and "script".

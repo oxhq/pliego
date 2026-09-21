@@ -4,6 +4,13 @@
   "base": "../accepted/representative.json",
   "cases": [
     {
+      "name": "retired-scene-version",
+      "mutations": [
+        { "operation": "replace", "path": "/scene/version", "value": 1 }
+      ],
+      "expected": "$.scene.version: expected const 2"
+    },
+    {
       "name": "unknown-role",
       "mutations": [
         { "operation": "replace", "path": "/nodes/1/role", "value": "custom-heading" }

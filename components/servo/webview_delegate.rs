@@ -8,11 +8,12 @@ use std::rc::Rc;
 use embedder_traits::{
     AlertResponse, AllowOrDeny, AuthenticationResponse, BluetoothDeviceDescription,
     ConfirmResponse, ConsoleLogLevel, ContextMenuAction, ContextMenuElementInformation,
-    ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlResponse, FilePickerRequest,
-    FilterPattern, InputEventId, InputEventResult, InputMethodType, LoadStatus, MediaSessionEvent,
-    NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RgbColor, ScreenGeometry,
-    SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest, TraversalId,
-    WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
+    ContextMenuItem, Cursor, DocumentClockConfiguration, EmbedderControlId,
+    EmbedderControlResponse, FilePickerRequest, FilterPattern, InputEventId, InputEventResult,
+    InputMethodType, LoadStatus, MediaSessionEvent, NewWebViewDetails, Notification,
+    PermissionFeature, PromptResponse, RgbColor, ScreenGeometry, SelectElementOptionOrOptgroup,
+    SelectElementRequest, SimpleDialogRequest, TraversalId, WebResourceRequest,
+    WebResourceResponse, WebResourceResponseMsg,
 };
 use paint_api::rendering_context::RenderingContext;
 use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
@@ -902,12 +903,18 @@ impl PromptDialog {
 pub struct CreateNewWebViewRequest {
     pub(crate) servo: Servo,
     pub(crate) responder: IpcResponder<Option<NewWebViewDetails>>,
+    pub(crate) document_clock: DocumentClockConfiguration,
 }
 
 impl CreateNewWebViewRequest {
     /// Returns a [`WebViewBuilder`] that can be used to create a new auxiliary [`WebView`].
     pub fn builder(self, rendering_context: Rc<dyn RenderingContext>) -> WebViewBuilder {
-        WebViewBuilder::new_for_create_request(&self.servo, rendering_context, self.responder)
+        WebViewBuilder::new_for_create_request(
+            &self.servo,
+            rendering_context,
+            self.responder,
+            self.document_clock,
+        )
     }
 }
 

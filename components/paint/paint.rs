@@ -14,8 +14,10 @@ use bitflags::bitflags;
 use crossbeam_channel::Sender;
 use dpi::PhysicalSize;
 use embedder_traits::{
-    EventLoopWaker, InputEventAndId, InputEventId, InputEventResult, ScreenshotCaptureError,
-    Scroll, ShutdownState, ViewportDetails, WebViewPoint, WebViewRect,
+    DocumentCaptureCommit, DocumentCapturePrecondition, DocumentPaintPresentationTicket,
+    DocumentPaintPresentationTicketId, EventLoopWaker, InputEventAndId, InputEventId,
+    InputEventResult, ScreenshotCaptureError, Scroll, ShutdownState, ViewportDetails, WebViewPoint,
+    WebViewRect,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
@@ -48,9 +50,11 @@ use webrender::{CaptureBits, MemoryReport};
 use webrender_api::units::{DevicePixel, DevicePoint};
 use webrender_api::{FontInstanceKey, FontKey, ImageKey};
 
-use crate::InitialPaintState;
 use crate::painter::Painter;
 use crate::webview_renderer::UnknownWebView;
+use crate::{
+    ControlledDocumentCaptureReservation, ControlledDocumentCaptureResult, InitialPaintState,
+};
 
 /// An option to control what kind of WebRender debugging is enabled while Servo is running.
 #[derive(Copy, Clone)]
@@ -716,6 +720,68 @@ impl Paint {
             .render(&self.time_profiler_chan);
     }
 
+    #[doc(hidden)]
+    pub fn reserve_controlled_document_capture(
+        &self,
+        webview_id: WebViewId,
+        precondition: &DocumentCapturePrecondition,
+    ) -> ControlledDocumentCaptureResult<ControlledDocumentCaptureReservation> {
+        if self.shutdown_state() != ShutdownState::NotShuttingDown {
+            return Err(crate::ControlledDocumentCaptureError::Terminal(
+                crate::ControlledDocumentCaptureFailure::ShuttingDown,
+            ));
+        }
+        let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) else {
+            return Err(crate::ControlledDocumentCaptureError::Terminal(
+                crate::ControlledDocumentCaptureFailure::WebViewDoesNotExist,
+            ));
+        };
+        painter.reserve_controlled_document_capture(
+            webview_id,
+            precondition,
+            &self.time_profiler_chan,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn finalize_controlled_document_capture(
+        &self,
+        webview_id: WebViewId,
+        ticket: &DocumentPaintPresentationTicket,
+        commit: &DocumentCaptureCommit,
+    ) -> ControlledDocumentCaptureResult<RgbaImage> {
+        if self.shutdown_state() != ShutdownState::NotShuttingDown {
+            // Shutdown invalidates every retained authority for this WebView. Clear it even when
+            // the supplied ticket was lost or mismatched so teardown cannot strand the Painter.
+            self.abort_current_controlled_document_capture(webview_id);
+            return Err(crate::ControlledDocumentCaptureError::Terminal(
+                crate::ControlledDocumentCaptureFailure::ShuttingDown,
+            ));
+        }
+        let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) else {
+            return Err(crate::ControlledDocumentCaptureError::Terminal(
+                crate::ControlledDocumentCaptureFailure::WebViewDoesNotExist,
+            ));
+        };
+        painter.finalize_controlled_document_capture(webview_id, ticket, commit)
+    }
+
+    #[doc(hidden)]
+    pub fn abort_controlled_document_capture(
+        &self,
+        webview_id: WebViewId,
+        ticket_id: DocumentPaintPresentationTicketId,
+    ) -> bool {
+        self.maybe_painter(webview_id.into())
+            .is_some_and(|painter| painter.abort_controlled_document_capture(webview_id, ticket_id))
+    }
+
+    #[doc(hidden)]
+    pub fn abort_current_controlled_document_capture(&self, webview_id: WebViewId) -> bool {
+        self.maybe_painter(webview_id.into())
+            .is_some_and(|painter| painter.abort_current_controlled_document_capture(webview_id))
+    }
+
     /// Get the message receiver for this [`Paint`].
     pub fn receiver(&self) -> &RoutedReceiver<PaintMessage> {
         &self.paint_receiver
@@ -723,15 +789,19 @@ impl Paint {
 
     #[servo_tracing::instrument(skip_all)]
     pub fn handle_messages(&self, mut messages: Vec<PaintMessage>) {
-        // Pull out the `NewWebRenderFrameReady` messages from the list of messages and handle them
-        // at the end of this function. This prevents overdraw when more than a single message of
-        // this type of received. In addition, if any of these frames need a repaint, that reflected
-        // when calling `handle_new_webrender_frame_ready`.
+        // Process every `NewWebRenderFrameReady` message here so controlled capture never loses
+        // its exact publish generation. Only the ordinary repaint decision is coalesced and handled
+        // at the end, which prevents overdraw when more than one ready message is received.
         let mut saw_webrender_frame_ready_for_painter = HashMap::new();
         messages.retain(|message| match message {
-            PaintMessage::NewWebRenderFrameReady(painter_id, _document_id, need_repaint) => {
+            PaintMessage::NewWebRenderFrameReady(
+                painter_id,
+                document_id,
+                publish_generation,
+                need_repaint,
+            ) => {
                 if let Some(painter) = self.maybe_painter(*painter_id) {
-                    painter.decrement_pending_frames();
+                    painter.process_webrender_frame_ready(*document_id, *publish_generation);
                     *saw_webrender_frame_ready_for_painter
                         .entry(*painter_id)
                         .or_insert(*need_repaint) |= *need_repaint;

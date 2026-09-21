@@ -5,13 +5,13 @@
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::default::Default;
 use std::ops::Deref;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{Arc as StdArc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitflags::bitflags;
 use chrono::Local;
@@ -22,7 +22,9 @@ use data_url::mime::Mime;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use dom_struct::dom_struct;
 use embedder_traits::{
-    AllowOrDeny, AnimationState, CustomHandlersAutomationMode, EmbedderMsg, Image, LoadStatus,
+    AllowOrDeny, AnimationState, CustomHandlersAutomationMode, DocumentCanvasCaptureStatus,
+    DocumentCanvasImageKey, DocumentSettlementSource, DocumentTrackedSourceKind,
+    DocumentUnsupportedSourceReason, EmbedderMsg, Image, LoadStatus,
 };
 use encoding_rs::{Encoding, UTF_8};
 use html5ever::{LocalName, Namespace, QualName, local_name, ns};
@@ -57,11 +59,16 @@ use script_bindings::trace::CustomTraceable;
 use script_traits::{DocumentActivity, ProgressiveWebMetricType};
 use servo_arc::Arc;
 use servo_base::cross_process_instant::CrossProcessInstant;
-use servo_base::generic_channel::GenericSend;
+use servo_base::generic_channel::{GenericReceiver, GenericSend};
 use servo_base::id::{PipelineId, WebViewId};
 use servo_base::{Epoch, generic_channel};
+use servo_canvas_traits::canvas::{
+    CanvasCaptureObservation, CanvasCaptureObservationStatus, CanvasId,
+};
 use servo_config::pref;
-use servo_constellation_traits::{NavigationHistoryBehavior, ScriptToConstellationMessage};
+use servo_constellation_traits::{
+    NavigationHistoryBehavior, PaintMetricTime, ScriptToConstellationMessage,
+};
 use servo_media::{ClientContextId, ServoMedia};
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use style::attr::AttrValue;
@@ -76,9 +83,12 @@ use style::stylesheets::{Origin, OriginSet, Stylesheet};
 use style::stylist::Stylist;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
+use timers::{DocumentClockError, DocumentRenderingTime, DocumentTime, DocumentTimeSurface};
 use url::{Host, Position};
+use webrender_api::{IdNamespace, ImageKey};
 
 use crate::animations::Animations;
+use crate::canvas_context::{CanvasContext, RenderingContext};
 use crate::document_loader::{DocumentLoader, LoadType};
 use crate::dom::FlatTreeParent;
 use crate::dom::animationtimeline::AnimationTimeline;
@@ -96,7 +106,6 @@ use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFram
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::Navigator_Binding::NavigatorMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::NodeFilterBinding::NodeFilter;
-use crate::dom::bindings::codegen::Bindings::PerformanceBinding::PerformanceMethods;
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionName;
 use crate::dom::bindings::codegen::Bindings::SanitizerBinding::{
     SetHTMLOptions, SetHTMLUnsafeOptions,
@@ -142,7 +151,7 @@ use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documentorshadowroot::{
     DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
 };
-use crate::dom::documenttimeline::DocumentTimeline;
+use crate::dom::documenttimeline::{DocumentTimeline, rendering_timestamp_from_elapsed};
 use crate::dom::documenttype::DocumentType;
 use crate::dom::domimplementation::DOMImplementation;
 use crate::dom::element::attributes::storage::AttrRef;
@@ -182,7 +191,7 @@ use crate::dom::node::{Node, NodeDamage, NodeFlags, NodeTraits};
 use crate::dom::nodeiterator::NodeIterator;
 use crate::dom::nodelist::NodeList;
 use crate::dom::pagetransitionevent::PageTransitionEvent;
-use crate::dom::performance::performanceentry::PerformanceEntry;
+use crate::dom::performance::performanceentry::{PerformanceEntry, PerformanceEntryTime};
 use crate::dom::performance::performancepainttiming::PerformancePaintTiming;
 use crate::dom::processinginstruction::ProcessingInstruction;
 use crate::dom::promise::Promise;
@@ -198,7 +207,7 @@ use crate::dom::text::Text;
 use crate::dom::touchevent::TouchEvent as DomTouchEvent;
 use crate::dom::touchlist::TouchList;
 use crate::dom::trustedtypes::trustedhtml::TrustedHTML;
-use crate::dom::types::{HTMLCanvasElement, VisibilityStateEntry};
+use crate::dom::types::{HTMLCanvasElement, HTMLMediaElement, VisibilityStateEntry};
 use crate::dom::uievent::UIEvent;
 use crate::dom::websocket::WebSocket;
 use crate::dom::window::Window;
@@ -219,6 +228,82 @@ use crate::task_manager::TaskManager;
 use crate::task_source::TaskSourceName;
 use crate::timers::{OneshotTimerCallback, OneshotTimers};
 use crate::xpath::parse_expression;
+
+/// Hard transport bound for one batch of trusted Canvas paint-thread tail-barrier responses.
+///
+/// This is not a settlement retry or delay. A missing response fails the source observation
+/// closed. The caller's independent host deadline may expire first; publication still fails closed.
+const CONTROLLED_CANVAS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Canonicalize tracker-derived unsupported DOM source identities.
+pub(crate) fn controlled_unsupported_dom_sources(
+    pipeline_id: PipelineId,
+    sources: impl IntoIterator<Item = (usize, DocumentUnsupportedSourceReason)>,
+) -> Vec<DocumentSettlementSource> {
+    sources
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|(node_id, reason)| {
+            DocumentSettlementSource::unsupported_dom_node_internal(pipeline_id, node_id, reason)
+        })
+        .collect()
+}
+
+fn controlled_canvas_capture_status(
+    status: CanvasCaptureObservationStatus,
+) -> DocumentCanvasCaptureStatus {
+    match status {
+        CanvasCaptureObservationStatus::Ready => DocumentCanvasCaptureStatus::Ready,
+        CanvasCaptureObservationStatus::RetentionDisabled => {
+            DocumentCanvasCaptureStatus::RetentionDisabled
+        },
+        CanvasCaptureObservationStatus::MissingCanvas => DocumentCanvasCaptureStatus::MissingCanvas,
+        CanvasCaptureObservationStatus::MissingImageKey => {
+            DocumentCanvasCaptureStatus::MissingImageKey
+        },
+        CanvasCaptureObservationStatus::ImageKeyMismatch => {
+            DocumentCanvasCaptureStatus::ImageKeyMismatch
+        },
+        CanvasCaptureObservationStatus::SizeMismatch => DocumentCanvasCaptureStatus::SizeMismatch,
+        CanvasCaptureObservationStatus::RetentionBudgetExceeded => {
+            DocumentCanvasCaptureStatus::RetentionBudgetExceeded
+        },
+        CanvasCaptureObservationStatus::UnsupportedTranscript => {
+            DocumentCanvasCaptureStatus::UnsupportedTranscript
+        },
+    }
+}
+
+fn receive_controlled_canvas_observation(
+    receiver: GenericReceiver<CanvasCaptureObservation>,
+    deadline: Instant,
+) -> Option<CanvasCaptureObservation> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    receiver.try_recv_timeout(remaining).ok()
+}
+
+struct ControlledCanvasObservation {
+    node_id: usize,
+    canvas_id: CanvasId,
+    image_key: Option<ImageKey>,
+    width: u32,
+    height: u32,
+    registry_generation: Option<u64>,
+    status: DocumentCanvasCaptureStatus,
+}
+
+struct PendingControlledCanvasObservation {
+    node_id: usize,
+    canvas_id: CanvasId,
+    image_key: Option<ImageKey>,
+    width: u32,
+    height: u32,
+    receiver: Option<GenericReceiver<CanvasCaptureObservation>>,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum FireMouseEventType {
@@ -657,6 +742,14 @@ pub(crate) struct Document {
     /// All websockets created that are associated with this document.
     websockets: DOMTracker<WebSocket>,
 
+    /// All live canvas elements currently or formerly owned by this document.
+    /// Collection filters current ownership and deduplicates adoption re-registration.
+    capture_canvases: DOMTracker<HTMLCanvasElement>,
+
+    /// All live media elements currently or formerly owned by this document.
+    /// Collection filters current ownership and deduplicates adoption re-registration.
+    capture_media_elements: DOMTracker<HTMLMediaElement>,
+
     /// <https://html.spec.whatwg.org/multipage/#details-name-group>
     details_name_groups: DomRefCell<Option<DetailsNameGroups>>,
 
@@ -760,6 +853,19 @@ impl Document {
 
     pub(crate) fn track_websocket(&self, websocket: &WebSocket) {
         self.websockets.track(websocket);
+    }
+
+    /// Track mutable DOM-backed capture sources independently of tree connectivity.
+    ///
+    /// Nodes are registered after reflection and again when adopted. The weak trackers may
+    /// therefore contain an old-document entry or a duplicate; observation filters current
+    /// ownership and canonicalizes exact node identities.
+    pub(crate) fn track_controlled_capture_node(&self, node: &Node) {
+        if let Some(canvas) = node.downcast::<HTMLCanvasElement>() {
+            self.capture_canvases.track(canvas);
+        } else if let Some(media) = node.downcast::<HTMLMediaElement>() {
+            self.capture_media_elements.track(media);
+        }
     }
 
     fn close_outstanding_websockets(&self) -> bool {
@@ -1767,17 +1873,26 @@ impl Document {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#run-the-animation-frame-callbacks>
-    pub(crate) fn run_the_animation_frame_callbacks(&self, cx: &mut CurrentRealm) {
+    pub(crate) fn run_the_animation_frame_callbacks(
+        &self,
+        cx: &mut CurrentRealm,
+        frame_time: DocumentRenderingTime,
+    ) {
         self.running_animation_callbacks.set(true);
-        let timing = self.global().performance(cx).Now();
+        let timing = self
+            .window()
+            .document_time_since_navigation(
+                frame_time.document_time(),
+                DocumentTimeSurface::AnimationFrame,
+            )
+            .map(rendering_timestamp_from_elapsed)
+            .expect("animation-frame time cannot precede the Window navigation origin");
 
-        let num_callbacks = self.animation_frame_list.borrow().len();
-        for _ in 0..num_callbacks {
-            let (_, maybe_callback) = self.animation_frame_list.borrow_mut().pop_front().unwrap();
-            if let Some(callback) = maybe_callback {
-                callback.call(cx, self, *timing);
-            }
-        }
+        run_animation_frame_callback_snapshot(
+            &self.animation_frame_list,
+            timing,
+            |callback, timestamp| callback.call(cx, self, *timestamp),
+        );
         self.running_animation_callbacks.set(false);
 
         if self.animation_frame_list.borrow().is_empty() {
@@ -3188,6 +3303,7 @@ impl Document {
         // the sake of taking screenshots. This has the effect of delaying screenshots
         // until layout has taken a shot at updating the rendering.
         if result {
+            self.window().layout().set_needs_new_display_list();
             self.add_rendering_update_reason(RenderingUpdateReason::FontReadyPromiseFulfilled);
         }
 
@@ -3417,10 +3533,27 @@ impl Document {
         &self,
         cx: &mut JSContext,
         metric_type: ProgressiveWebMetricType,
-        metric_value: CrossProcessInstant,
+        metric_value: PaintMetricTime,
         first_reflow: bool,
     ) {
         let metrics = self.interactive_time.borrow();
+        let entry_time = match metric_value {
+            PaintMetricTime::Host(instant) => PerformanceEntryTime::Host(instant),
+            PaintMetricTime::Document(time_ns) => {
+                let Ok(relative) = self.window.document_time_since_navigation(
+                    DocumentTime::from_nanos(time_ns),
+                    DocumentTimeSurface::Performance,
+                ) else {
+                    // The controlled-clock terminal is already visible to the control plane. Do
+                    // not invent a host or zero timestamp for a page-visible performance entry.
+                    return;
+                };
+                let Ok(relative) = TimeDuration::try_from(relative) else {
+                    return;
+                };
+                PerformanceEntryTime::Document(relative)
+            },
+        };
         match metric_type {
             ProgressiveWebMetricType::FirstPaint |
             ProgressiveWebMetricType::FirstContentfulPaint => {
@@ -3428,9 +3561,11 @@ impl Document {
                     cx,
                     self.window.as_global_scope(),
                     metric_type.clone(),
-                    metric_value,
+                    entry_time,
                 );
-                metrics.set_performance_paint_metric(metric_value, first_reflow, metric_type);
+                if let PaintMetricTime::Host(metric_value) = metric_value {
+                    metrics.set_performance_paint_metric(metric_value, first_reflow, metric_type);
+                }
                 let entry = binding.upcast::<PerformanceEntry>();
                 self.window.Performance(cx).queue_entry(entry);
             },
@@ -3438,11 +3573,13 @@ impl Document {
                 let binding = LargestContentfulPaint::new(
                     cx,
                     self.window.as_global_scope(),
-                    metric_value,
+                    entry_time,
                     area,
                     url,
                 );
-                metrics.set_largest_contentful_paint(metric_value, area);
+                if let PaintMetricTime::Host(metric_value) = metric_value {
+                    metrics.set_largest_contentful_paint(metric_value, area);
+                }
                 let entry = binding.upcast::<PerformanceEntry>();
                 self.window.Performance(cx).queue_entry(entry);
             },
@@ -3851,6 +3988,8 @@ impl Document {
             creation_sandboxing_flag_set: Cell::new(creation_sandboxing_flag_set),
             favicon: RefCell::new(None),
             websockets: DOMTracker::new(),
+            capture_canvases: DOMTracker::new(),
+            capture_media_elements: DOMTracker::new(),
             details_name_groups: Default::default(),
             protocol_handler_automation_mode: Default::default(),
             layout_animations_test_enabled: pref!(layout_animations_test_enabled),
@@ -4643,6 +4782,213 @@ impl Document {
         &self.animations
     }
 
+    /// Capture exact Window-owned settlement sources, including detached live DOM objects.
+    pub(crate) fn controlled_settlement_sources(
+        &self,
+        document_now: DocumentTime,
+    ) -> Result<Vec<DocumentSettlementSource>, DocumentClockError> {
+        let pipeline_id = self.pipeline_id();
+        let mut sources = self.animations.controlled_settlement_sources(
+            pipeline_id,
+            self.current_animation_timeline_value(),
+            document_now,
+        );
+        sources.extend(self.timers.controlled_settlement_sources(pipeline_id)?);
+        sources.extend(
+            self.animation_frame_list
+                .borrow()
+                .iter()
+                .map(|(callback_id, callback)| {
+                    DocumentSettlementSource::animation_frame_internal(
+                        pipeline_id,
+                        *callback_id,
+                        callback.is_some(),
+                    )
+                }),
+        );
+
+        let mut active_websockets = 0_u64;
+        self.websockets.for_each(|websocket| {
+            if websocket.is_controlled_capture_active() {
+                active_websockets = active_websockets.saturating_add(1);
+            }
+        });
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            pipeline_id,
+            DocumentTrackedSourceKind::WebSocket,
+            active_websockets,
+        ));
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            pipeline_id,
+            DocumentTrackedSourceKind::EmbedderControl,
+            u64::try_from(self.embedder_controls.controlled_capture_visible_count())
+                .unwrap_or(u64::MAX),
+        ));
+        sources.extend(
+            self.window
+                .as_global_scope()
+                .controlled_settlement_sources(pipeline_id),
+        );
+
+        // These DOM-owned classes can advance outside the controlled CSS/timer/rAF inventory.
+        // Weak owner trackers, unlike a connected-tree walk, retain detached live objects. Nodes
+        // re-registered after adoption are filtered by current ownership and deduplicated here.
+        let mut unsupported_nodes = Vec::new();
+        self.capture_media_elements.for_each(|media| {
+            if &*media.owner_document() == self {
+                unsupported_nodes.push((
+                    media.upcast::<Node>().to_opaque().id(),
+                    DocumentUnsupportedSourceReason::MediaElement,
+                ));
+            }
+        });
+        let mut capture_canvases = Vec::new();
+        self.capture_canvases.for_each(|canvas| {
+            if &*canvas.owner_document() != self {
+                return;
+            }
+            capture_canvases.push(canvas);
+        });
+        capture_canvases.sort_unstable_by_key(|canvas| canvas.upcast::<Node>().to_opaque().id());
+        capture_canvases.dedup_by_key(|canvas| canvas.upcast::<Node>().to_opaque().id());
+
+        let mut canvas_2d_nodes = Vec::new();
+        for canvas in capture_canvases {
+            let node_id = canvas.upcast::<Node>().to_opaque().id();
+            let Some(context) = canvas.context() else {
+                continue;
+            };
+            let reason = match &*context {
+                RenderingContext::Context2d(_) => {
+                    canvas_2d_nodes.push((node_id, canvas.clone()));
+                    continue;
+                },
+                RenderingContext::BitmapRenderer(_) => {
+                    DocumentUnsupportedSourceReason::BitmapRendererCanvas
+                },
+                RenderingContext::WebGL(_) | RenderingContext::WebGL2(_) => {
+                    DocumentUnsupportedSourceReason::WebGlCanvas
+                },
+                #[cfg(feature = "webgpu")]
+                RenderingContext::WebGPU(_) => DocumentUnsupportedSourceReason::WebGpuCanvas,
+                RenderingContext::Placeholder(_) => {
+                    DocumentUnsupportedSourceReason::OffscreenCanvas
+                },
+            };
+            unsupported_nodes.push((node_id, reason));
+        }
+
+        // Root every live 2D Canvas across all three phases. Flushing every context before
+        // enqueueing any observation makes the observations a common tail barrier on Servo's one
+        // Canvas paint-thread queue.
+        let flush_succeeded = canvas_2d_nodes
+            .iter()
+            .map(|(_, canvas)| {
+                canvas.context().is_some_and(|context| {
+                    matches!(&*context, RenderingContext::Context2d(context) if context.flush_capture_commands().is_ok())
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut pending_requests = Vec::with_capacity(canvas_2d_nodes.len());
+        for ((node_id, canvas), flush_succeeded) in canvas_2d_nodes.iter().zip(flush_succeeded) {
+            let image_key = canvas.capture_image_key();
+            let size = canvas.get_size();
+            let canvas_id = canvas
+                .context()
+                .and_then(|context| match &*context {
+                    RenderingContext::Context2d(context) => Some(context.context_id()),
+                    _ => None,
+                })
+                .unwrap_or(CanvasId(u64::MAX));
+            let receiver = flush_succeeded
+                .then(|| {
+                    let context = canvas.context()?;
+                    let RenderingContext::Context2d(context) = &*context else {
+                        return None;
+                    };
+                    context.enqueue_capture_observation(image_key, size).ok()
+                })
+                .flatten();
+            pending_requests.push(PendingControlledCanvasObservation {
+                node_id: *node_id,
+                canvas_id,
+                image_key,
+                width: size.width,
+                height: size.height,
+                receiver,
+            });
+        }
+        let mut observations = Vec::with_capacity(pending_requests.len());
+        let observation_deadline = Instant::now() + CONTROLLED_CANVAS_OBSERVATION_TIMEOUT;
+        for pending in pending_requests {
+            observations.push(
+                match pending.receiver.and_then(|receiver| {
+                    receive_controlled_canvas_observation(receiver, observation_deadline)
+                }) {
+                    Some(observation)
+                        if observation.canvas_id == pending.canvas_id &&
+                            observation.image_key == pending.image_key &&
+                            observation.size.width == pending.width &&
+                            observation.size.height == pending.height =>
+                    {
+                        ControlledCanvasObservation {
+                            node_id: pending.node_id,
+                            canvas_id: pending.canvas_id,
+                            image_key: pending.image_key,
+                            width: pending.width,
+                            height: pending.height,
+                            registry_generation: observation.registry_generation,
+                            status: controlled_canvas_capture_status(observation.status),
+                        }
+                    },
+                    _ => ControlledCanvasObservation {
+                        node_id: pending.node_id,
+                        canvas_id: pending.canvas_id,
+                        image_key: pending.image_key,
+                        width: pending.width,
+                        height: pending.height,
+                        registry_generation: None,
+                        status: DocumentCanvasCaptureStatus::ObservationUnavailable,
+                    },
+                },
+            );
+        }
+        let ready_generations = observations
+            .iter()
+            .filter(|observation| observation.status == DocumentCanvasCaptureStatus::Ready)
+            .filter_map(|observation| observation.registry_generation)
+            .collect::<BTreeSet<_>>();
+        if ready_generations.len() > 1 {
+            for observation in &mut observations {
+                if observation.status == DocumentCanvasCaptureStatus::Ready {
+                    observation.status = DocumentCanvasCaptureStatus::MixedGeneration;
+                }
+            }
+        }
+        sources.extend(observations.into_iter().map(|observation| {
+            let image_key = observation
+                .image_key
+                .map(|ImageKey(IdNamespace(namespace), key)| {
+                    DocumentCanvasImageKey::new_internal(namespace, key)
+                });
+            DocumentSettlementSource::canvas_2d_internal(
+                pipeline_id,
+                observation.node_id,
+                observation.canvas_id.0,
+                image_key,
+                observation.width,
+                observation.height,
+                observation.registry_generation,
+                observation.status,
+            )
+        }));
+        sources.extend(controlled_unsupported_dom_sources(
+            pipeline_id,
+            unsupported_nodes,
+        ));
+        Ok(sources)
+    }
+
     pub(crate) fn update_animations_post_reflow(&self) {
         let current_timeline_value = self.current_animation_timeline_value();
         self.animations
@@ -4660,10 +5006,14 @@ impl Document {
     }
 
     /// An implementation of <https://drafts.csswg.org/web-animations-1/#update-animations-and-send-events>.
-    pub(crate) fn update_animations_and_send_events(&self, cx: &mut CurrentRealm) {
+    pub(crate) fn update_animations_and_send_events(
+        &self,
+        cx: &mut CurrentRealm,
+        frame_time: DocumentRenderingTime,
+    ) {
         // Only update the time if it isn't being managed by a test.
         if !self.layout_animations_test_enabled {
-            self.timeline.update(self.window());
+            self.timeline.update(self.window(), frame_time);
         }
 
         // > 1. Update the current time of all timelines associated with doc passing now
@@ -4988,6 +5338,116 @@ impl Document {
 
     pub(crate) fn set_iframe_load_in_progress(&self, value: bool) {
         self.iframe_load_in_progress.set(value)
+    }
+}
+
+fn run_animation_frame_callback_snapshot<T, Timestamp: Copy>(
+    callbacks: &DomRefCell<VecDeque<(u32, Option<T>)>>,
+    timestamp: Timestamp,
+    mut invoke: impl FnMut(T, Timestamp),
+) {
+    // Snapshot only the list length. Keeping the remaining entries in the live list lets an
+    // earlier callback cancel a later callback in this same snapshot, while callbacks appended by
+    // a callback remain beyond this bound for the next rendering opportunity.
+    let callback_count = callbacks.borrow().len();
+    for _ in 0..callback_count {
+        let (_, callback) = callbacks
+            .borrow_mut()
+            .pop_front()
+            .expect("the snapshotted animation-frame callback must remain in the list");
+        if let Some(callback) = callback {
+            invoke(callback, timestamp);
+        }
+    }
+}
+
+#[cfg(test)]
+mod animation_frame_callback_tests {
+    use style::thread_state::{self, ThreadState};
+
+    use super::*;
+
+    struct ScriptThreadStateGuard {
+        entered_script: bool,
+    }
+
+    impl ScriptThreadStateGuard {
+        fn enter() -> Self {
+            let entered_script = !thread_state::get().is_script();
+            if entered_script {
+                thread_state::enter(ThreadState::SCRIPT);
+            }
+            Self { entered_script }
+        }
+    }
+
+    impl Drop for ScriptThreadStateGuard {
+        fn drop(&mut self) {
+            if self.entered_script {
+                thread_state::exit(ThreadState::SCRIPT);
+            }
+        }
+    }
+
+    #[test]
+    fn same_deadline_callbacks_share_timestamp_and_nested_raf_waits_for_next_snapshot() {
+        let _script_thread_state = ScriptThreadStateGuard::enter();
+        let callbacks = DomRefCell::new(VecDeque::from([(1, Some(1)), (2, Some(2))]));
+        let observed = RefCell::new(Vec::new());
+
+        run_animation_frame_callback_snapshot(&callbacks, 50_u64, |callback, timestamp| {
+            observed.borrow_mut().push((callback, timestamp));
+            if callback == 1 {
+                callbacks.borrow_mut().push_back((3, Some(3)));
+            }
+        });
+
+        assert_eq!(*observed.borrow(), vec![(1, 50), (2, 50)]);
+        assert_eq!(*callbacks.borrow(), VecDeque::from([(3, Some(3))]));
+
+        run_animation_frame_callback_snapshot(&callbacks, 70_u64, |callback, timestamp| {
+            observed.borrow_mut().push((callback, timestamp));
+        });
+        assert_eq!(*observed.borrow(), vec![(1, 50), (2, 50), (3, 70)]);
+    }
+
+    #[test]
+    fn callback_can_cancel_a_later_entry_in_the_current_snapshot() {
+        let _script_thread_state = ScriptThreadStateGuard::enter();
+        let callbacks = DomRefCell::new(VecDeque::from([(1, Some(1)), (2, Some(2))]));
+        let observed = RefCell::new(Vec::new());
+
+        run_animation_frame_callback_snapshot(&callbacks, 50_u64, |callback, timestamp| {
+            observed.borrow_mut().push((callback, timestamp));
+            if callback == 1 {
+                callbacks
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|(identifier, _)| *identifier == 2)
+                    .unwrap()
+                    .1 = None;
+            }
+        });
+
+        assert_eq!(*observed.borrow(), vec![(1, 50)]);
+        assert!(callbacks.borrow().is_empty());
+    }
+
+    #[test]
+    fn missing_canvas_capture_observations_share_one_expired_batch_deadline() {
+        let (_first_sender, first_receiver) =
+            generic_channel::channel::<CanvasCaptureObservation>().unwrap();
+        let (_second_sender, second_receiver) =
+            generic_channel::channel::<CanvasCaptureObservation>().unwrap();
+        let expired_batch_deadline = Instant::now();
+
+        assert!(
+            receive_controlled_canvas_observation(first_receiver, expired_batch_deadline).is_none()
+        );
+        assert!(
+            receive_controlled_canvas_observation(second_receiver, expired_batch_deadline)
+                .is_none()
+        );
     }
 }
 
@@ -6450,8 +6910,9 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         // document.close() before emitting an end-of-file token). The encoding confidence is
         // irrelevant.
         let resource_threads = self.window.as_global_scope().resource_threads().clone();
+        let producer_fence = self.loader().producer_fence();
         *self.loader.borrow_mut() =
-            DocumentLoader::new_with_threads(resource_threads, Some(self.url()));
+            DocumentLoader::new_with_threads(resource_threads, Some(self.url()), producer_fence);
         ServoParser::parse_html_script_input(cx, self, self.url());
 
         // Step 17. Set the insertion point to point at just before the end of the input stream

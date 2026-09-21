@@ -15,6 +15,7 @@
       "required": [
         "schema",
         "version",
+        "status",
         "generated_at",
         "host",
         "toolchain",
@@ -30,7 +31,7 @@
         "generated_at": { "type": "string" },
         "status": { "type": "string", "enum": ["supported", "failed"] },
         "host": { "$ref": "#/definitions/host" },
-        "toolchain": { "$ref": "#/definitions/toolchain" },
+        "toolchain": { "$ref": "#/definitions/publishable_toolchain" },
         "protocol": { "$ref": "#/definitions/protocol" },
         "target": { "$ref": "#/definitions/target" },
         "fixture": { "$ref": "#/definitions/fixture" },
@@ -113,12 +114,23 @@
         "engine": { "$ref": "#/definitions/engine" },
         "python_version": { "type": "string" },
         "php_version": { "type": "string" },
-        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "competitors": {
           "type": "object",
           "additionalProperties": { "type": "string" }
         }
       }
+    },
+    "publishable_toolchain": {
+      "allOf": [
+        { "$ref": "#/definitions/toolchain" },
+        {
+          "required": ["harness_revision", "competitors"],
+          "properties": {
+            "competitors": { "type": "object", "minProperties": 1 }
+          }
+        }
+      ]
     },
     "engine": {
       "type": "object",
@@ -146,6 +158,8 @@
       "additionalProperties": false,
       "required": [
         "warmup_iterations",
+        "correctness_preflight_iterations",
+        "execution_order",
         "sample_count",
         "sample_order",
         "network",
@@ -155,6 +169,11 @@
       ],
       "properties": {
         "warmup_iterations": { "type": "integer", "minimum": 0 },
+        "correctness_preflight_iterations": { "type": "integer", "minimum": 0 },
+        "execution_order": {
+          "type": "string",
+          "enum": ["untimed-correctness-preflight,warmup,timed"]
+        },
         "sample_count": { "type": "integer", "minimum": 1 },
         "sample_order": { "type": "string", "enum": ["random", "sequential"] },
         "seed": { "type": "integer" },
@@ -211,6 +230,26 @@
         "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "expected_page_count": { "type": ["integer", "null"], "minimum": 1 },
+        "expected_page_width_points": { "type": ["number", "null"], "minimum": 0 },
+        "expected_page_height_points": { "type": ["number", "null"], "minimum": 0 },
+        "dimension_tolerance_points": { "type": ["number", "null"], "minimum": 0 },
+        "expected_text_contains": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_text": { "type": ["string", "null"] },
+        "expected_font_families": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_normalized_raster_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expected_link_targets": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "expected_failure_code": { "type": ["string", "null"] }
       }
     },
@@ -222,6 +261,7 @@
         "ok",
         "exit_code",
         "wall_ms",
+        "one_shot_wall_ms",
         "user_ms",
         "sys_ms",
         "memory_current_bytes",
@@ -244,6 +284,7 @@
         "ok": { "type": "boolean" },
         "exit_code": { "type": "integer" },
         "wall_ms": { "type": "number", "minimum": 0 },
+        "one_shot_wall_ms": { "type": "number", "minimum": 0 },
         "user_ms": { "type": ["number", "null"], "minimum": 0 },
         "sys_ms": { "type": ["number", "null"], "minimum": 0 },
         "memory_current_bytes": { "type": ["integer", "null"], "minimum": 0 },
@@ -432,14 +473,14 @@
     "launch_security": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["account", "uid", "gid", "argv", "executable", "status", "migration_write_probes"],
+      "required": ["account", "uid", "gid", "argv", "executable", "launch_context", "output_capture", "status", "migration_write_probes", "temporary_storage"],
       "properties": {
         "account": { "const": "pliego-benchmark-engine" },
         "uid": { "type": "integer", "minimum": 1 },
         "gid": { "type": "integer", "minimum": 1 },
         "argv": {
           "type": "array",
-          "minItems": 3,
+          "minItems": 2,
           "items": { "type": "string", "minLength": 1 }
         },
         "executable": {
@@ -451,6 +492,29 @@
             "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "device": { "type": "integer", "minimum": 0 },
             "inode": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "launch_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["browser_tmpdir", "cwd", "tmpdir"],
+          "properties": {
+            "browser_tmpdir": { "type": ["string", "null"], "minLength": 1 },
+            "cwd": { "type": "string", "minLength": 1 },
+            "tmpdir": { "type": "string", "minLength": 1 }
+          }
+        },
+        "output_capture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract", "filesystem", "max_bytes_per_stream", "write_sync", "pre", "post"],
+          "properties": {
+            "contract": { "const": "root-bound-tmpfs-engine-output-v1" },
+            "filesystem": { "const": "tmpfs" },
+            "max_bytes_per_stream": { "const": 16777216 },
+            "write_sync": { "const": "O_SYNC" },
+            "pre": { "$ref": "#/definitions/engine_output_capture_snapshot" },
+            "post": { "$ref": "#/definitions/engine_output_capture_snapshot" }
           }
         },
         "status": {
@@ -489,6 +553,255 @@
             "staging": { "$ref": "#/definitions/migration_denials" },
             "measurement": { "$ref": "#/definitions/migration_denials" }
           }
+        },
+        "temporary_storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["access_time", "account_home", "browser_shared_memory", "directory_sync", "file_sync", "filesystem", "native_api2_path_bindings", "runtime_environment", "runtime_path_bindings", "runtime_target", "scope"],
+          "properties": {
+            "access_time": { "const": "FS_NOATIME_FL" },
+            "account_home": { "$ref": "#/definitions/account_home_proof" },
+            "browser_shared_memory": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/definitions/browser_shared_memory_proof" }
+              ]
+            },
+            "directory_sync": { "const": "FS_DIRSYNC_FL" },
+            "file_sync": { "const": "FS_SYNC_FL" },
+            "filesystem": { "const": "ext4" },
+            "native_api2_path_bindings": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["pre", "post"],
+              "properties": {
+                "pre": { "$ref": "#/definitions/native_api2_storage_snapshot" },
+                "post": { "$ref": "#/definitions/native_api2_storage_snapshot" }
+              }
+            },
+            "runtime_environment": {
+              "enum": ["fixed-account-home-v1", "fresh-private-home-xdg-v1"]
+            },
+            "runtime_path_bindings": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["pre", "post"],
+              "properties": {
+                "pre": { "$ref": "#/definitions/runtime_path_snapshot" },
+                "post": { "$ref": "#/definitions/runtime_path_snapshot" }
+              }
+            },
+            "runtime_target": {
+              "enum": ["browsershot-adapter-v1", "generic-benchmark-engine-v1"]
+            },
+            "scope": { "const": "per-invocation-private" }
+          }
+        },
+        "network_isolation": {
+          "$ref": "#/definitions/network_isolation"
+        }
+      }
+    },
+    "account_home_proof": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "state"],
+          "properties": {
+            "path": { "const": "/nonexistent/pliego-benchmark-engine" },
+            "state": { "const": "absent" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "path", "state"],
+          "properties": {
+            "identity": { "$ref": "#/definitions/filesystem_identity" },
+            "path": { "const": "/nonexistent/pliego-benchmark-engine" },
+            "state": { "const": "non-writable" }
+          }
+        }
+      ]
+    },
+    "filesystem_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "inode"],
+      "properties": {
+        "device": { "type": "integer", "minimum": 0 },
+        "inode": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "engine_output_capture_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "streams"],
+      "properties": {
+        "root": { "$ref": "#/definitions/output_capture_root_binding" },
+        "streams": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stdout", "stderr"],
+          "properties": {
+            "stdout": { "$ref": "#/definitions/output_capture_stream_binding" },
+            "stderr": { "$ref": "#/definitions/output_capture_stream_binding" }
+          }
+        }
+      }
+    },
+    "browser_shared_memory_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "filesystem", "semantics", "pre", "post"],
+      "properties": {
+        "contract": { "const": "bound-private-tmpfs-browser-shared-memory-v1" },
+        "filesystem": { "const": "tmpfs" },
+        "semantics": { "const": "puppeteer-node-chrome-temporary-storage-v1" },
+        "pre": { "$ref": "#/definitions/browser_shared_memory_snapshot" },
+        "post": { "$ref": "#/definitions/browser_shared_memory_snapshot" }
+      }
+    },
+    "browser_shared_memory_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "container", "directory", "container_entries", "directory_entries"],
+      "properties": {
+        "root": { "$ref": "#/definitions/output_capture_root_binding" },
+        "container": { "$ref": "#/definitions/browser_shared_memory_directory_binding" },
+        "directory": { "$ref": "#/definitions/browser_shared_memory_directory_binding" },
+        "container_entries": {
+          "type": "array",
+          "items": { "const": "tmp" },
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "directory_entries": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "browser_shared_memory_directory_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode", "link_count"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 },
+        "link_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "output_capture_root_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "output_capture_stream_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode", "link_count", "size_bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 },
+        "link_count": { "type": "integer", "minimum": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "native_api2_storage_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindings", "contract"],
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["controlled_root", "sandbox", "job", "temporary"],
+          "properties": {
+            "controlled_root": { "$ref": "#/definitions/storage_path_binding" },
+            "sandbox": { "$ref": "#/definitions/storage_path_binding" },
+            "job": { "$ref": "#/definitions/storage_path_binding" },
+            "temporary": { "$ref": "#/definitions/storage_path_binding" }
+          }
+        },
+        "contract": { "const": "native-api2-storage-bindings-v1" }
+      }
+    },
+    "storage_path_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "path"],
+      "properties": {
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "runtime_path_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindings", "contract", "temporary_root"],
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"],
+          "properties": {
+            "HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_CACHE_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_CONFIG_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_DATA_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_RUNTIME_DIR": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_STATE_HOME": { "$ref": "#/definitions/runtime_path_binding" }
+          }
+        },
+        "contract": { "const": "runtime-path-bindings-v1" },
+        "temporary_root": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "path"],
+          "properties": {
+            "identity": { "$ref": "#/definitions/filesystem_identity" },
+            "path": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "runtime_path_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "relative_path"],
+      "properties": {
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "relative_path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "network_isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "host_namespace", "engine_namespace", "interfaces"],
+      "properties": {
+        "mode": { "const": "linux-private-network-namespace-v1" },
+        "host_namespace": { "type": "string", "pattern": "^net:\\[[0-9]+\\]$" },
+        "engine_namespace": { "type": "string", "pattern": "^net:\\[[0-9]+\\]$" },
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "const": "lo" }
         }
       }
     },
@@ -510,6 +823,7 @@
         "duration_ms",
         "reads",
         "stable_reads",
+        "reclaim",
         "stable_observations"
       ],
       "properties": {
@@ -518,11 +832,34 @@
         "duration_ms": { "type": "number", "minimum": 0 },
         "reads": { "type": "integer", "minimum": 2 },
         "stable_reads": { "const": 2 },
+        "reclaim": { "$ref": "#/definitions/accounting_reclaim" },
         "stable_observations": {
           "type": "array",
           "minItems": 2,
           "items": { "$ref": "#/definitions/settle_observation" }
         }
+      }
+    },
+    "accounting_reclaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["triggered", "requested_bytes", "write_result", "before", "after"],
+      "properties": {
+        "triggered": { "type": "boolean" },
+        "requested_bytes": { "type": "integer", "minimum": 0 },
+        "write_result": { "enum": ["not-needed", "success", "under-reclaimed"] },
+        "before": { "$ref": "#/definitions/reclaim_memory_snapshot" },
+        "after": { "$ref": "#/definitions/reclaim_memory_snapshot" }
+      }
+    },
+    "reclaim_memory_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_current_bytes", "memory_file_dirty_bytes", "memory_file_writeback_bytes"],
+      "properties": {
+        "memory_current_bytes": { "type": "integer", "minimum": 0 },
+        "memory_file_dirty_bytes": { "type": "integer", "minimum": 0 },
+        "memory_file_writeback_bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "settle_observation": {
@@ -708,11 +1045,35 @@
     "output": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["pdf_bytes", "pdf_sha256", "page_count", "artifact_bytes", "published_pdf"],
+      "required": [
+        "pdf_bytes",
+        "pdf_sha256",
+        "page_count",
+        "artifact_bytes",
+        "published_pdf",
+        "normalized_text_sha256",
+        "font_families",
+        "normalized_raster_sha256"
+      ],
       "properties": {
         "pdf_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "pdf_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "page_count": { "type": ["integer", "null"], "minimum": 1 },
+        "page_dimensions_points": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "number", "minimum": 0 }
+          }
+        },
+        "normalized_text_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "font_families": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "normalized_raster_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "artifact_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "published_pdf": { "type": "boolean" }
       }
@@ -797,9 +1158,12 @@
         "throughput": {
           "type": "object",
           "additionalProperties": false,
+          "required": ["renders_per_minute", "concurrency", "mean_one_shot_wall_ms", "measurement_boundary"],
           "properties": {
             "renders_per_minute": { "type": "number", "minimum": 0 },
-            "concurrency": { "type": "integer", "minimum": 1 }
+            "concurrency": { "type": "integer", "minimum": 1 },
+            "mean_one_shot_wall_ms": { "type": "number", "exclusiveMinimum": 0 },
+            "measurement_boundary": { "const": "runner-process-open-through-sampler-exit" }
           }
         },
         "output": {

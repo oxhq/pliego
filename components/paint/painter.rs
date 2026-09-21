@@ -10,8 +10,10 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use dpi::PhysicalSize;
 use embedder_traits::{
-    InputEvent, InputEventAndId, InputEventId, InputEventResult, PaintHitTestResult,
-    ScreenshotCaptureError, Scroll, ViewportDetails, WebViewPoint, WebViewRect,
+    DocumentCaptureCommit, DocumentCapturePrecondition, DocumentCaptureSurfaceFingerprint,
+    DocumentPaintPresentationTicket, DocumentPaintPresentationTicketId, InputEvent,
+    InputEventAndId, InputEventId, InputEventResult, PaintHitTestResult, ScreenshotCaptureError,
+    Scroll, ViewportDetails, WebViewPoint, WebViewRect,
 };
 use euclid::{Point2D, Rect, Scale, Size2D};
 use gleam::gl::RENDERER;
@@ -34,7 +36,9 @@ use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::generic_channel::{GenericReceiver, GenericSharedMemory};
 use servo_base::id::{PainterId, PipelineId, WebViewId};
 use servo_config::{opts, pref};
-use servo_constellation_traits::{EmbedderToConstellationMessage, PaintMetricEvent};
+use servo_constellation_traits::{
+    EmbedderToConstellationMessage, PaintMetricEvent, PaintMetricTime,
+};
 use servo_geometry::DeviceIndependentPixel;
 use smallvec::SmallVec;
 use style_traits::CSSPixel;
@@ -42,19 +46,27 @@ use webrender::{
     MemoryReport, ONE_TIME_USAGE_HINT, RenderApi, ShaderPrecacheFlags, Transaction, UploadMethod,
 };
 use webrender_api::units::{
-    DevicePixel, DevicePoint, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform, LayoutVector2D,
-    WorldPoint,
+    DeviceIntRect, DeviceIntSize, DevicePixel, DevicePoint, LayoutPoint, LayoutRect, LayoutSize,
+    LayoutTransform, LayoutVector2D, WorldPoint,
 };
 use webrender_api::{
     self, BuiltDisplayList, BuiltDisplayListDescriptor, ColorF, DirtyRect, DisplayListPayload,
     DocumentId, DynamicProperties, Epoch as WebRenderEpoch, ExternalScrollId, FontInstanceFlags,
-    FontInstanceKey, FontInstanceOptions, FontKey, FontVariation, ImageData, ImageKey,
-    NativeFontHandle, PipelineId as WebRenderPipelineId, PropertyBinding, ReferenceFrameKind,
-    RenderReasons, SampledScrollOffset, SpaceAndClipInfo, SpatialId, TransformStyle,
+    FontInstanceKey, FontInstanceOptions, FontKey, FontVariation, FramePublishId, ImageData,
+    ImageKey, NativeFontHandle, PipelineId as WebRenderPipelineId, PropertyBinding,
+    ReferenceFrameKind, RenderReasons, SampledScrollOffset, SpaceAndClipInfo, SpatialId,
+    TransformStyle,
 };
 use wr_malloc_size_of::MallocSizeOfOps;
 
 use crate::Paint;
+use crate::controlled_capture::{
+    ControlledCaptureLedger, ControlledDocumentCaptureError, ControlledDocumentCaptureFailure,
+    ControlledDocumentCaptureReservation, ControlledDocumentCaptureResult,
+    ControlledDocumentCaptureRetry, frame_pending, perform_after_validation, require_exact_epoch,
+    require_exact_renderer_epoch, require_no_pending_or_animation, require_root_and_surface,
+    terminal,
+};
 use crate::largest_contentful_paint_calculator::LargestContentfulPaintCalculator;
 use crate::paint::{RepaintReason, WebRenderDebugOption};
 use crate::refresh_driver::{AnimationRefreshDriverObserver, BaseRefreshDriver};
@@ -63,6 +75,10 @@ use crate::screenshot::ScreenshotTaker;
 use crate::web_content_animation::WebContentAnimator;
 use crate::webrender_external_images::WebGLExternalImages;
 use crate::webview_renderer::{PinchZoomResult, ScrollResult, UnknownWebView, WebViewRenderer};
+
+fn renderer_publish_target(target_publish_generation: Option<u64>) -> FramePublishId {
+    FramePublishId(target_publish_generation.unwrap_or(u64::MAX))
+}
 
 /// A [`Painter`] is responsible for all of the painting to a particular [`RenderingContext`].
 /// This holds all of the WebRender specific data structures and state necessary for painting
@@ -132,6 +148,10 @@ pub(crate) struct Painter {
     /// A [`WebContentAnimator`] used to manage web content-derived animations. Currently this only
     /// manages blinking caret animations.
     web_content_animator: WebContentAnimator,
+
+    /// Checked single-use presentation state for controlled document capture. A framebuffer may
+    /// be shared by WebViews, so there is exactly one ledger per Painter rather than per WebView.
+    controlled_capture: ControlledCaptureLedger<DocumentPaintPresentationTicket>,
 }
 
 impl Drop for Painter {
@@ -284,6 +304,7 @@ impl Painter {
                 paint.event_loop_waker.clone_box(),
                 (*timer_refresh_driver).clone(),
             ),
+            controlled_capture: Default::default(),
         };
         painter.assert_gl_framebuffer_complete();
         painter.clear_background();
@@ -350,10 +371,205 @@ impl Painter {
     /// to WebRender and is not ready yet or because the [`FrameDelayer`] is delaying a frame
     /// waiting for asynchronous (canvas) image updates to complete.
     pub(crate) fn has_pending_frames(&self) -> bool {
-        self.pending_frames.get() != 0 || self.frame_delayer.pending_frame
+        self.pending_frames.get() != 0 ||
+            self.frame_delayer.pending_frame ||
+            !self.frame_delayer.pending_canvas_images.is_empty()
+    }
+
+    fn note_controlled_capture_mutation(&self) {
+        // Overflow is sticky and reported through the typed reservation/finalization API. Ordinary
+        // interactive rendering must continue even after controlled capture has latched terminal.
+        let _ = self.controlled_capture.note_mutation();
+    }
+
+    fn has_capture_blocking_animation_or_scroll(&self) -> bool {
+        self.webview_renderers.values().any(|webview| {
+            webview.has_capture_blocking_animation() || webview.has_pending_scroll_or_zoom()
+        })
+    }
+
+    fn exact_device_coordinate(value: i32, scale: f32) -> Option<i32> {
+        let scaled = f64::from(value) * f64::from(scale);
+        if !scaled.is_finite() || scaled.fract() != 0.0 {
+            return None;
+        }
+        i32::try_from(scaled as i64).ok()
+    }
+
+    fn capture_rect_for_surface(
+        &self,
+        webview_id: WebViewId,
+        surface: DocumentCaptureSurfaceFingerprint,
+    ) -> ControlledDocumentCaptureResult<DeviceIntRect> {
+        surface
+            .validate()
+            .map_err(|_| terminal(ControlledDocumentCaptureFailure::SurfaceMismatch))?;
+        let Some(webview) = self.webview_renderers.get(&webview_id) else {
+            return Err(terminal(
+                ControlledDocumentCaptureFailure::WebViewDoesNotExist,
+            ));
+        };
+        let scale = surface.device_pixel_scale();
+        if webview.hidpi_scale_factor().get().to_bits() != scale.to_bits() {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        }
+
+        let viewport = surface.viewport();
+        let Some(viewport_width) = Self::exact_device_coordinate(viewport.width, scale) else {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        };
+        let Some(viewport_height) = Self::exact_device_coordinate(viewport.height, scale) else {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        };
+        let expected_viewport = DeviceIntSize::new(viewport_width, viewport_height);
+        let context_size = self.rendering_context.size2d();
+        if i32::try_from(context_size.width).ok() != Some(expected_viewport.width) ||
+            i32::try_from(context_size.height).ok() != Some(expected_viewport.height) ||
+            webview.rect.min != DevicePoint::origin() ||
+            webview.rect.size().width.to_bits() != (viewport_width as f32).to_bits() ||
+            webview.rect.size().height.to_bits() != (viewport_height as f32).to_bits()
+        {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        }
+
+        let capture = surface.capture_rect();
+        let (Some(min_x), Some(min_y), Some(max_x), Some(max_y)) = (
+            Self::exact_device_coordinate(capture.min.x, scale),
+            Self::exact_device_coordinate(capture.min.y, scale),
+            Self::exact_device_coordinate(capture.max.x, scale),
+            Self::exact_device_coordinate(capture.max.y, scale),
+        ) else {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        };
+        let Some(width) = max_x.checked_sub(min_x) else {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        };
+        let Some(height) = max_y.checked_sub(min_y) else {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        };
+        let Some(gl_y) = viewport_height.checked_sub(max_y) else {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        };
+        if min_x < 0 ||
+            max_x > viewport_width ||
+            min_y < 0 ||
+            max_y > viewport_height ||
+            width <= 0 ||
+            height <= 0
+        {
+            return Err(terminal(ControlledDocumentCaptureFailure::SurfaceMismatch));
+        }
+        Ok(DeviceIntRect::from_origin_and_size(
+            Point2D::new(min_x, gl_y),
+            Size2D::new(width, height),
+        ))
+    }
+
+    fn require_exact_webview_presentation(
+        &self,
+        webview_id: WebViewId,
+        pipeline_id: PipelineId,
+        surface: DocumentCaptureSurfaceFingerprint,
+    ) -> ControlledDocumentCaptureResult<DeviceIntRect> {
+        let Some(webview) = self.webview_renderers.get(&webview_id) else {
+            return Err(terminal(
+                ControlledDocumentCaptureFailure::WebViewDoesNotExist,
+            ));
+        };
+        require_root_and_surface(
+            webview.has_single_connected_root(pipeline_id),
+            self.capture_rect_for_surface(webview_id, surface).is_ok(),
+        )?;
+        if webview.hidden() ||
+            self.webview_renderers.values().any(|other| {
+                other.id != webview_id && !other.hidden() && other.root_pipeline_id.is_some()
+            })
+        {
+            return Err(terminal(
+                ControlledDocumentCaptureFailure::SharedFramebufferMismatch,
+            ));
+        }
+        self.capture_rect_for_surface(webview_id, surface)
+    }
+
+    fn actual_display_list_epoch(
+        &self,
+        webview_id: WebViewId,
+        pipeline_id: PipelineId,
+    ) -> Option<u32> {
+        self.webview_renderers
+            .get(&webview_id)
+            .and_then(|webview| webview.pipelines.get(&pipeline_id))
+            .and_then(|pipeline| pipeline.actual_display_list_epoch)
+            .map(|epoch| epoch.0)
+    }
+
+    fn renderer_epoch(&self, pipeline_id: PipelineId) -> Option<u32> {
+        self.webrender_renderer
+            .as_ref()
+            .and_then(|renderer| {
+                renderer.current_epoch(self.webrender_document, pipeline_id.into())
+            })
+            .map(|epoch| epoch.0)
+    }
+
+    fn validate_capture_precondition(
+        &self,
+        webview_id: WebViewId,
+        precondition: &DocumentCapturePrecondition,
+    ) -> ControlledDocumentCaptureResult<(PipelineId, Epoch)> {
+        if precondition.target().webview_id != webview_id {
+            return Err(terminal(ControlledDocumentCaptureFailure::WebViewMismatch));
+        }
+        let [document] = precondition.documents() else {
+            return Err(terminal(
+                ControlledDocumentCaptureFailure::InvalidPrecondition,
+            ));
+        };
+        let pipeline_id = document.pipeline_id;
+        if !document.readiness_blockers.is_empty() ||
+            precondition.target().fully_active_pipelines.as_slice() != [pipeline_id] ||
+            precondition.target().pipelines.as_slice() != [pipeline_id]
+        {
+            return Err(terminal(
+                ControlledDocumentCaptureFailure::InvalidPrecondition,
+            ));
+        }
+        self.require_exact_webview_presentation(webview_id, pipeline_id, precondition.surface())?;
+        require_no_pending_or_animation(
+            self.has_pending_frames(),
+            self.has_capture_blocking_animation_or_scroll(),
+        )?;
+        require_exact_epoch(
+            self.actual_display_list_epoch(webview_id, pipeline_id),
+            document.script_rendering_epoch.0,
+        )?;
+        Ok((pipeline_id, document.script_rendering_epoch))
+    }
+
+    fn validate_commit(
+        ticket: &DocumentPaintPresentationTicket,
+        commit: &DocumentCaptureCommit,
+    ) -> ControlledDocumentCaptureResult<()> {
+        if commit.candidate_id() != ticket.candidate_id() ||
+            commit.ticket_id() != ticket.id() ||
+            commit.target() != ticket.target() ||
+            commit.pipeline_id() != ticket.pipeline_id() ||
+            commit.script_rendering_epoch() != ticket.script_rendering_epoch() ||
+            commit.surface() != ticket.surface() ||
+            commit.presentation_generation() != ticket.presentation_generation() ||
+            commit.publish_generation() != ticket.publish_generation() ||
+            commit.layout_paint_epoch() != ticket.script_rendering_epoch()
+        {
+            return Err(terminal(ControlledDocumentCaptureFailure::CommitMismatch));
+        }
+        Ok(())
     }
 
     pub(crate) fn set_needs_repaint(&self, reason: RepaintReason) {
+        if !reason.is_empty() {
+            self.note_controlled_capture_mutation();
+        }
         let mut needs_repaint = self.needs_repaint.get();
         needs_repaint.insert(reason);
         self.needs_repaint.set(needs_repaint);
@@ -388,23 +604,54 @@ impl Painter {
             .collect()
     }
 
-    pub(crate) fn send_to_constellation(&self, message: EmbedderToConstellationMessage) {
+    fn try_send_to_constellation(&self, message: EmbedderToConstellationMessage) -> bool {
         if let Err(error) = self.embedder_to_constellation_sender.send(message) {
             warn!("Could not send message to constellation ({error:?})");
+            return false;
         }
+        true
+    }
+
+    pub(crate) fn send_to_constellation(&self, message: EmbedderToConstellationMessage) {
+        let _ = self.try_send_to_constellation(message);
     }
 
     #[servo_tracing::instrument(skip_all)]
     pub(crate) fn render(&mut self, time_profiler_channel: &ProfilerChan) {
+        let _ = self.render_internal(time_profiler_channel, None, true, None);
+    }
+
+    fn render_internal(
+        &mut self,
+        time_profiler_channel: &ProfilerChan,
+        target_publish_generation: Option<u64>,
+        take_screenshots: bool,
+        controlled_metric: Option<(PipelineId, PaintMetricTime)>,
+    ) -> ControlledDocumentCaptureResult<bool> {
+        debug_assert_eq!(
+            target_publish_generation.is_some(),
+            controlled_metric.is_some(),
+        );
+        self.note_controlled_capture_mutation();
         let refresh_driver = self.refresh_driver.clone();
         refresh_driver.notify_will_paint(self);
 
         if let Err(error) = self.rendering_context.make_current() {
             error!("Failed to make the rendering context current: {error:?}");
+            if target_publish_generation.is_some() {
+                return Err(terminal(
+                    ControlledDocumentCaptureFailure::RenderingContextUnavailable,
+                ));
+            }
+        }
+        if target_publish_generation.is_some() && self.webrender_renderer.is_none() {
+            return Err(frame_pending());
         }
         self.assert_no_gl_error();
 
         self.rendering_context.prepare_for_rendering();
+        let mut controlled_render_failed = false;
+        let renderer_publish_target = renderer_publish_target(target_publish_generation);
 
         time_profile!(
             ProfilerCategory::Painting,
@@ -412,25 +659,202 @@ impl Painter {
             time_profiler_channel.clone(),
             || {
                 if let Some(renderer) = self.webrender_renderer.as_mut() {
+                    // WebRender's target is sticky and has no clear API. Controlled rendering
+                    // installs the exact bound; ordinary rendering overwrites it with the largest
+                    // representable ID so newer queued documents cannot remain deferred.
+                    renderer.set_target_frame_publish_id(renderer_publish_target);
                     renderer.update();
                 }
 
-                // Paint the scene.
-                // TODO(gw): Take notice of any errors the renderer returns!
+                // Paint the scene. Ordinary rendering remains best-effort; controlled rendering
+                // records a failure and refuses to issue a ticket.
                 self.clear_background();
                 if let Some(renderer) = self.webrender_renderer.as_mut() {
                     let size = self.rendering_context.size2d().to_i32();
-                    renderer.render(size, 0 /* buffer_age */).ok();
+                    if renderer.render(size, 0 /* buffer_age */).is_err() &&
+                        target_publish_generation.is_some()
+                    {
+                        controlled_render_failed = true;
+                    }
                 }
             }
         );
+
+        if controlled_render_failed {
+            // The framebuffer was cleared but the controlled frame was not painted. Keep the
+            // ordinary presentation path live so it can recover the visible content.
+            self.set_needs_repaint(RepaintReason::NewWebRenderFrame);
+            return Err(terminal(ControlledDocumentCaptureFailure::RenderFailed));
+        }
 
         // We've painted the default target, which means that from the embedder's perspective,
         // the scene no longer needs to be repainted.
         self.needs_repaint.set(RepaintReason::empty());
 
-        self.screenshot_taker.maybe_take_screenshots(self);
-        self.send_pending_paint_metrics_messages_after_composite();
+        if take_screenshots {
+            self.screenshot_taker.maybe_take_screenshots(self);
+        }
+        let (paint_metric_time, controlled_pipeline_id) = match controlled_metric {
+            Some((pipeline_id, time)) => (time, Some(pipeline_id)),
+            None => (PaintMetricTime::Host(CrossProcessInstant::now()), None),
+        };
+        let document_work_queued = self.complete_pending_paint_metrics_after_composite(
+            paint_metric_time,
+            controlled_pipeline_id,
+        )?;
+        Ok(document_work_queued)
+    }
+
+    pub(crate) fn reserve_controlled_document_capture(
+        &mut self,
+        webview_id: WebViewId,
+        precondition: &DocumentCapturePrecondition,
+        time_profiler_channel: &ProfilerChan,
+    ) -> ControlledDocumentCaptureResult<ControlledDocumentCaptureReservation> {
+        self.controlled_capture.revision()?;
+        if self.controlled_capture.has_reservation() {
+            return Err(ControlledDocumentCaptureError::Retryable(
+                ControlledDocumentCaptureRetry::ReservationOccupied,
+            ));
+        }
+
+        let (pipeline_id, expected_epoch) =
+            self.validate_capture_precondition(webview_id, precondition)?;
+        let publish_generation = self.controlled_capture.publish_generation()?;
+
+        // Render synchronously at no later than the exact frame-ready generation Paint processed.
+        // This path deliberately skips ScreenshotTaker so reservation itself never reads pixels.
+        let document_work_queued = self.render_internal(
+            time_profiler_channel,
+            Some(publish_generation),
+            false,
+            Some((
+                pipeline_id,
+                PaintMetricTime::Document(precondition.now().as_nanos()),
+            )),
+        )?;
+        if document_work_queued {
+            return Ok(ControlledDocumentCaptureReservation::DocumentWorkQueued);
+        }
+
+        let (post_render_pipeline_id, post_render_epoch) =
+            self.validate_capture_precondition(webview_id, precondition)?;
+        if post_render_pipeline_id != pipeline_id || post_render_epoch != expected_epoch {
+            return Err(terminal(
+                ControlledDocumentCaptureFailure::PresentationInvalidated,
+            ));
+        }
+        require_exact_renderer_epoch(self.renderer_epoch(pipeline_id), expected_epoch.0)?;
+        if self.controlled_capture.publish_generation()? != publish_generation {
+            return Err(terminal(
+                ControlledDocumentCaptureFailure::PresentationInvalidated,
+            ));
+        }
+
+        // Reservation issuance is the presentation linearization point and receives its own
+        // checked generation after the actual render mutation.
+        let presentation_generation = self.controlled_capture.note_mutation()?;
+        let ticket = DocumentPaintPresentationTicket::new_internal(
+            DocumentPaintPresentationTicketId::new(presentation_generation),
+            precondition.id(),
+            precondition.target().clone(),
+            pipeline_id,
+            expected_epoch,
+            precondition.surface(),
+            presentation_generation,
+            publish_generation,
+        );
+        self.controlled_capture.retain(ticket.clone())?;
+        Ok(ControlledDocumentCaptureReservation::Reserved(ticket))
+    }
+
+    pub(crate) fn finalize_controlled_document_capture(
+        &mut self,
+        webview_id: WebViewId,
+        supplied_ticket: &DocumentPaintPresentationTicket,
+        commit: &DocumentCaptureCommit,
+    ) -> ControlledDocumentCaptureResult<RgbaImage> {
+        // Take first: every mismatch and every later validation failure consumes Paint authority.
+        let ticket = self.controlled_capture.take_matching(supplied_ticket)?;
+        perform_after_validation(
+            || {
+                Self::validate_commit(&ticket, commit)?;
+                if ticket.target().webview_id != webview_id {
+                    return Err(terminal(ControlledDocumentCaptureFailure::WebViewMismatch));
+                }
+                if self.controlled_capture.revision()? != ticket.presentation_generation() {
+                    return Err(terminal(
+                        ControlledDocumentCaptureFailure::PresentationInvalidated,
+                    ));
+                }
+                let current_publish_generation = self
+                    .controlled_capture
+                    .publish_generation()
+                    .map_err(|error| match error {
+                        ControlledDocumentCaptureError::Terminal(failure) => {
+                            ControlledDocumentCaptureError::Terminal(failure)
+                        },
+                        ControlledDocumentCaptureError::Retryable(_) => {
+                            terminal(ControlledDocumentCaptureFailure::PresentationInvalidated)
+                        },
+                    })?;
+                if current_publish_generation != ticket.publish_generation() {
+                    return Err(terminal(
+                        ControlledDocumentCaptureFailure::PresentationInvalidated,
+                    ));
+                }
+                let capture_rect = self.require_exact_webview_presentation(
+                    webview_id,
+                    ticket.pipeline_id(),
+                    ticket.surface(),
+                )?;
+                if self.has_pending_frames() {
+                    return Err(terminal(
+                        ControlledDocumentCaptureFailure::PresentationInvalidated,
+                    ));
+                }
+                if self.has_capture_blocking_animation_or_scroll() {
+                    return Err(terminal(ControlledDocumentCaptureFailure::AnimationActive));
+                }
+                if self.actual_display_list_epoch(webview_id, ticket.pipeline_id()) !=
+                    Some(ticket.script_rendering_epoch().0)
+                {
+                    return Err(terminal(
+                        ControlledDocumentCaptureFailure::PresentationInvalidated,
+                    ));
+                }
+                if self.renderer_epoch(ticket.pipeline_id()) !=
+                    Some(ticket.script_rendering_epoch().0)
+                {
+                    return Err(terminal(
+                        ControlledDocumentCaptureFailure::RendererEpochMismatch,
+                    ));
+                }
+                Ok(capture_rect)
+            },
+            |capture_rect| {
+                self.rendering_context.make_current().map_err(|_| {
+                    terminal(ControlledDocumentCaptureFailure::RenderingContextUnavailable)
+                })?;
+                self.rendering_context
+                    .read_to_image(capture_rect)
+                    .ok_or_else(|| terminal(ControlledDocumentCaptureFailure::ReadbackFailed))
+            },
+        )
+    }
+
+    pub(crate) fn abort_controlled_document_capture(
+        &self,
+        webview_id: WebViewId,
+        ticket_id: DocumentPaintPresentationTicketId,
+    ) -> bool {
+        self.controlled_capture.abort_where(|ticket| {
+            ticket.id() == ticket_id && ticket.target().webview_id == webview_id
+        })
+    }
+
+    pub(crate) fn abort_current_controlled_document_capture(&self, webview_id: WebViewId) -> bool {
+        self.controlled_capture.abort_for_webview(webview_id)
     }
 
     fn clear_background(&self) {
@@ -456,10 +880,18 @@ impl Painter {
     /// of the ones that the paint metrics recorder is expecting. In that case, we get the
     /// current time, inform the constellation about it and remove the pending metric from
     /// the list.
-    fn send_pending_paint_metrics_messages_after_composite(&mut self) {
-        let paint_time = CrossProcessInstant::now();
+    fn complete_pending_paint_metrics_after_composite(
+        &mut self,
+        paint_time: PaintMetricTime,
+        controlled_pipeline_id: Option<PipelineId>,
+    ) -> ControlledDocumentCaptureResult<bool> {
+        let mut document_work_queued = false;
+        let mut dispatch_failed = false;
         for webview_renderer in self.webview_renderers.values() {
             for (pipeline_id, pipeline) in webview_renderer.pipelines.iter() {
+                if controlled_pipeline_id.is_some_and(|target| *pipeline_id != target) {
+                    continue;
+                }
                 let Some(current_epoch) = self
                     .webrender_renderer
                     .as_ref()
@@ -484,12 +916,18 @@ impl Painter {
                             pipeline_id = ?pipeline_id,
                         );
 
-                        self.send_to_constellation(EmbedderToConstellationMessage::PaintMetric(
-                            *pipeline_id,
-                            PaintMetricEvent::FirstPaint(paint_time, first_reflow),
-                        ));
+                        let delivered = self.try_send_to_constellation(
+                            EmbedderToConstellationMessage::PaintMetric(
+                                *pipeline_id,
+                                PaintMetricEvent::FirstPaint(paint_time, first_reflow),
+                            ),
+                        );
 
-                        pipeline.first_paint_metric.set(PaintMetricState::Sent);
+                        document_work_queued |= delivered;
+                        dispatch_failed |= !delivered;
+                        if delivered || controlled_pipeline_id.is_none() {
+                            pipeline.first_paint_metric.set(PaintMetricState::Sent);
+                        }
                     },
                     _ => {},
                 }
@@ -504,19 +942,26 @@ impl Painter {
                             paint_time = ?paint_time,
                             pipeline_id = ?pipeline_id,
                         );
-                        self.send_to_constellation(EmbedderToConstellationMessage::PaintMetric(
-                            *pipeline_id,
-                            PaintMetricEvent::FirstContentfulPaint(paint_time, first_reflow),
-                        ));
-                        pipeline
-                            .first_contentful_paint_metric
-                            .set(PaintMetricState::Sent);
+                        let delivered = self.try_send_to_constellation(
+                            EmbedderToConstellationMessage::PaintMetric(
+                                *pipeline_id,
+                                PaintMetricEvent::FirstContentfulPaint(paint_time, first_reflow),
+                            ),
+                        );
+                        document_work_queued |= delivered;
+                        dispatch_failed |= !delivered;
+                        if delivered || controlled_pipeline_id.is_none() {
+                            pipeline
+                                .first_contentful_paint_metric
+                                .set(PaintMetricState::Sent);
+                        }
                     },
                     _ => {},
                 }
 
                 match pipeline.largest_contentful_paint_metric.get() {
                     PaintMetricState::Seen(epoch, _) if epoch <= current_epoch => {
+                        let mut metric_completed = true;
                         if let Some(lcp) = self
                             .lcp_calculator
                             .calculate_largest_contentful_paint(paint_time, pipeline_id.into())
@@ -525,33 +970,46 @@ impl Painter {
                             tracing::info!(
                                 name: "LargestContentfulPaint",
                                 servo_profiling = true,
-                                paint_time = ?paint_time,
-                                area = ?lcp.area,
+                                paint_time = ?lcp.time,
+                                area = ?lcp.paint.area,
                                 pipeline_id = ?pipeline_id,
                             );
-                            self.send_to_constellation(
+                            let delivered = self.try_send_to_constellation(
                                 EmbedderToConstellationMessage::PaintMetric(
                                     *pipeline_id,
                                     PaintMetricEvent::LargestContentfulPaint(
-                                        lcp.paint_time,
-                                        lcp.area,
-                                        lcp.url.clone(),
+                                        lcp.time,
+                                        lcp.paint.area,
+                                        lcp.paint.url.clone(),
                                     ),
                                 ),
                             );
+                            document_work_queued |= delivered;
+                            dispatch_failed |= !delivered;
+                            metric_completed = delivered || controlled_pipeline_id.is_none();
                         }
-                        pipeline
-                            .largest_contentful_paint_metric
-                            .set(PaintMetricState::Sent);
+                        if metric_completed {
+                            pipeline
+                                .largest_contentful_paint_metric
+                                .set(PaintMetricState::Sent);
+                        }
                     },
                     _ => {},
                 }
             }
         }
+        if dispatch_failed && controlled_pipeline_id.is_some() {
+            Err(terminal(
+                ControlledDocumentCaptureFailure::PaintMetricDispatchFailed,
+            ))
+        } else {
+            Ok(document_work_queued)
+        }
     }
 
     /// Queue a new frame in the transaction and increase the pending frames count.
     pub(crate) fn generate_frame(&self, transaction: &mut Transaction, reason: RenderReasons) {
+        self.note_controlled_capture_mutation();
         transaction.generate_frame(0, true /* present */, false /* tracked */, reason);
         self.pending_frames.set(self.pending_frames.get() + 1);
     }
@@ -581,6 +1039,7 @@ impl Painter {
     }
 
     pub(crate) fn send_transaction(&mut self, transaction: Transaction) {
+        self.note_controlled_capture_mutation();
         let _ = self.rendering_context.make_current();
         self.webrender_api
             .send_transaction(self.webrender_document, transaction);
@@ -757,8 +1216,27 @@ impl Painter {
         self.send_transaction(txn);
     }
 
-    pub(crate) fn decrement_pending_frames(&self) {
-        self.pending_frames.set(self.pending_frames.get() - 1);
+    pub(crate) fn process_webrender_frame_ready(
+        &self,
+        document_id: DocumentId,
+        publish_generation: u64,
+    ) {
+        self.note_controlled_capture_mutation();
+        if document_id != self.webrender_document {
+            self.controlled_capture
+                .note_publish_generation(publish_generation);
+            self.controlled_capture.mark_publish_generation_ambiguous();
+            return;
+        }
+        let Some(pending_frames) = self.pending_frames.get().checked_sub(1) else {
+            self.controlled_capture
+                .note_publish_generation(publish_generation);
+            self.controlled_capture.mark_publish_generation_ambiguous();
+            return;
+        };
+        self.pending_frames.set(pending_frames);
+        self.controlled_capture
+            .note_publish_generation(publish_generation);
     }
 
     pub(crate) fn report_memory(&self) -> MemoryReport {
@@ -772,6 +1250,7 @@ impl Painter {
         pipeline_id: PipelineId,
         animation_state: embedder_traits::AnimationState,
     ) {
+        self.note_controlled_capture_mutation();
         let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
             return;
         };
@@ -791,6 +1270,7 @@ impl Painter {
     }
 
     pub(crate) fn set_frame_tree_for_webview(&mut self, frame_tree: &SendableFrameTree) {
+        self.note_controlled_capture_mutation();
         debug!("{}: Setting frame tree for webview", frame_tree.pipeline.id);
 
         let webview_id = frame_tree.pipeline.webview_id;
@@ -811,6 +1291,7 @@ impl Painter {
         pipeline_id: PipelineId,
         throttled: bool,
     ) {
+        self.note_controlled_capture_mutation();
         let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
             return;
         };
@@ -833,6 +1314,7 @@ impl Painter {
         pipeline_id: PipelineId,
         pipeline_exit_source: PipelineExitSource,
     ) {
+        self.note_controlled_capture_mutation();
         debug!("Paint got pipeline exited: {webview_id:?} {pipeline_id:?}",);
         if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
             webview_renderer.pipeline_exited(pipeline_id, pipeline_exit_source);
@@ -925,6 +1407,7 @@ impl Painter {
         pipeline_id: PipelineId,
         epoch: Epoch,
     ) {
+        self.note_controlled_capture_mutation();
         let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
             return warn!("Could not find WebView for Epoch update.");
         };
@@ -941,6 +1424,7 @@ impl Painter {
         display_list_info_receiver: GenericReceiver<PaintDisplayListInfo>,
         display_list_data_receiver: GenericReceiver<SerializableDisplayListPayload>,
     ) {
+        self.note_controlled_capture_mutation();
         let Ok(display_list_info) = display_list_info_receiver.recv() else {
             return log::error!("Could not receive display list info");
         };
@@ -970,6 +1454,7 @@ impl Painter {
         details.install_new_scroll_tree(display_list_info.scroll_tree);
         details.viewport_scale = Some(display_list_info.viewport_details.hidpi_scale_factor);
 
+        details.actual_display_list_epoch = Some(display_list_info.epoch);
         let epoch = display_list_info.epoch.into();
         let first_reflow = display_list_info.first_reflow;
         if details.first_paint_metric.get() == PaintMetricState::Waiting &&
@@ -1007,6 +1492,7 @@ impl Painter {
     }
 
     pub(crate) fn generate_frame_for_script(&mut self) {
+        self.note_controlled_capture_mutation();
         self.frame_delayer.set_pending_frame(true);
 
         if !self.frame_delayer.needs_new_frame() {
@@ -1114,6 +1600,7 @@ impl Painter {
         canvas_epoch: Epoch,
         image_keys: Vec<ImageKey>,
     ) {
+        self.note_controlled_capture_mutation();
         self.frame_delayer
             .add_delay(pipeline_id, canvas_epoch, image_keys);
     }
@@ -1185,6 +1672,7 @@ impl Painter {
         webview_id: WebViewId,
         viewport_description: ViewportDescription,
     ) {
+        self.note_controlled_capture_mutation();
         if let Some(webview) = self.webview_renderers.get_mut(&webview_id) {
             webview.set_viewport_description(viewport_description);
         }
@@ -1204,6 +1692,7 @@ impl Painter {
         webview: Box<dyn WebViewTrait>,
         viewport_details: ViewportDetails,
     ) {
+        self.note_controlled_capture_mutation();
         self.webview_renderers
             .entry(webview.id())
             .or_insert(WebViewRenderer::new(
@@ -1216,6 +1705,9 @@ impl Painter {
     }
 
     pub(crate) fn remove_webview(&mut self, webview_id: WebViewId) {
+        // A caller can lose the opaque ticket value. Removing its target is the final scoped
+        // recovery boundary before a sibling WebView continues using this shared Painter.
+        self.abort_current_controlled_document_capture(webview_id);
         if self.webview_renderers.remove(&webview_id).is_none() {
             warn!("Tried removing unknown WebView: {webview_id:?}");
             return;
@@ -1266,6 +1758,7 @@ impl Painter {
         webview_id: WebViewId,
         new_size: Size2D<f32, DevicePixel>,
     ) {
+        self.note_controlled_capture_mutation();
         let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
             return;
         };
@@ -1297,6 +1790,7 @@ impl Painter {
     }
 
     pub(crate) fn set_page_zoom(&mut self, webview_id: WebViewId, new_zoom: f32) {
+        self.note_controlled_capture_mutation();
         if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
             webview_renderer.set_page_zoom(Scale::new(new_zoom));
         }
@@ -1314,6 +1808,7 @@ impl Painter {
         webview_id: WebViewId,
         event: InputEventAndId,
     ) -> bool {
+        self.note_controlled_capture_mutation();
         self.webview_renderers
             .get_mut(&webview_id)
             .is_some_and(|webview_renderer| {
@@ -1346,6 +1841,7 @@ impl Painter {
         scroll: Scroll,
         point: WebViewPoint,
     ) {
+        self.note_controlled_capture_mutation();
         if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
             webview_renderer.notify_scroll_event(scroll, point);
         }
@@ -1367,6 +1863,7 @@ impl Painter {
         pinch_zoom_delta: f32,
         center: DevicePoint,
     ) {
+        self.note_controlled_capture_mutation();
         if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
             webview_renderer.adjust_pinch_zoom(pinch_zoom_delta, center);
         }
@@ -1413,6 +1910,7 @@ impl Painter {
         input_event_id: InputEventId,
         result: InputEventResult,
     ) {
+        self.note_controlled_capture_mutation();
         let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
             warn!("Handled input event for unknown webview: {webview_id}");
             return;
@@ -1506,6 +2004,22 @@ impl Painter {
                     .set(PaintMetricState::Seen(epoch.into(), false));
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod controlled_render_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_render_overwrites_a_controlled_publish_target() {
+        let controlled = renderer_publish_target(Some(7));
+        let ordinary = renderer_publish_target(None);
+
+        assert_eq!(controlled, FramePublishId(7));
+        assert_eq!(ordinary, FramePublishId(u64::MAX));
+        assert!(FramePublishId(8) > controlled);
+        assert!(FramePublishId(8) <= ordinary);
     }
 }
 

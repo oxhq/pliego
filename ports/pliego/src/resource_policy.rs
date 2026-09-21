@@ -72,6 +72,7 @@ pub struct VirtualResourceSpec {
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Clone, Debug)]
 pub(crate) struct ResourcePolicy {
+    resolved_document_root: Option<PathBuf>,
     pub(crate) allowed_http_roots: Vec<url::Url>,
     pub(crate) virtual_resources: Vec<VirtualResource>,
     pub(crate) asset_manifest: Option<PathBuf>,
@@ -98,6 +99,7 @@ pub(crate) enum ResourcePolicySetupFailure<'a> {
 impl Default for ResourcePolicy {
     fn default() -> Self {
         Self {
+            resolved_document_root: None,
             allowed_http_roots: Vec::new(),
             virtual_resources: Vec::new(),
             asset_manifest: None,
@@ -150,7 +152,10 @@ pub(crate) enum ResourceSource {
     VirtualResource,
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    any(feature = "document-session", feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ControlledResource {
     pub(crate) status: u16,
@@ -587,6 +592,7 @@ impl ResourcePolicy {
             resident_bytes += assets.resident_bytes();
         }
         Self {
+            resolved_document_root: Some(document_root.to_owned()),
             allowed_http_roots: config.allowed_http_roots.clone(),
             virtual_resources,
             asset_manifest,
@@ -596,6 +602,10 @@ impl ResourcePolicy {
             aggregate_limit: aggregate_limit_exceeded.then_some(max_resident_bytes),
             timeout_ms: config.timeout_ms,
         }
+    }
+
+    pub(crate) fn resolved_document_root(&self) -> Option<&Path> {
+        self.resolved_document_root.as_deref()
     }
 
     pub(crate) fn aggregate_limit_error(&self) -> Option<(&'static str, String)> {
@@ -615,6 +625,23 @@ impl ResourcePolicy {
         }
         self.aggregate_limit_error()
             .map(|(code, message)| ResourcePolicySetupFailure::Aggregate { code, message })
+    }
+
+    /// Return the exact asset-manifest path retained by `artifact()`.
+    ///
+    /// A successful store owns the canonical path captured while it read the manifest. The
+    /// request path may be a symlink that has since changed, so recovery identity must never
+    /// reconstruct this value by canonicalizing `asset_manifest` again.
+    pub(crate) fn summary_asset_manifest_path(&self) -> Option<&Path> {
+        match (
+            &self.assets,
+            &self.asset_error,
+            self.asset_manifest.as_deref(),
+        ) {
+            (Some(assets), _, _) => Some(assets.manifest_path()),
+            (None, Some(_), Some(path)) => Some(path),
+            _ => None,
+        }
     }
 
     pub(crate) fn decide(
@@ -1044,7 +1071,10 @@ pub(crate) fn classify_controlled_http_status(
     }
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    any(feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 pub(crate) fn retain_controlled_resource(
     resources: &mut std::collections::BTreeMap<(String, String), ControlledResource>,
     resident_bytes: &mut u64,

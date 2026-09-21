@@ -185,6 +185,10 @@ impl HTMLCanvasElement {
         Ref::filter_map(self.context_mode.borrow(), |ctx| ctx.as_ref()).ok()
     }
 
+    pub(crate) fn capture_image_key(&self) -> Option<ImageKey> {
+        self.image_key.get()
+    }
+
     fn set_rendering_context(&self, make_rendering_context: impl FnOnce() -> RenderingContext) {
         self.upcast::<Node>().dirty(NodeDamage::ContentOrHeritage);
         self.context_mode

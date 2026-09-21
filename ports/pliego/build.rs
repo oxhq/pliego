@@ -4,10 +4,108 @@
 
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
+mod build_support;
+
+use build_support::{
+    normalize_git_path, servo_workspace_version_from_manifest, windows_gpu_export_link_args,
+};
+
+fn git_output(workspace_root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_owned())
+        .map_err(|error| error.to_string())
+}
+
+fn servo_workspace_version(workspace_manifest: &Path) -> Result<String, String> {
+    let manifest = fs::read_to_string(workspace_manifest).map_err(|error| error.to_string())?;
+    servo_workspace_version_from_manifest(&manifest)
+}
+
+fn emit_servo_build_identity(workspace_root: &Path) -> Result<(), Box<dyn Error>> {
+    let workspace_manifest = workspace_root.join("Cargo.toml");
+    println!("cargo:rerun-if-changed={}", workspace_manifest.display());
+
+    let servo_version = servo_workspace_version(&workspace_manifest)?;
+    println!("cargo:rustc-env=PLIEGO_SERVO_VERSION={servo_version}");
+
+    match git_output(workspace_root, &["rev-parse", "--short", "HEAD"]) {
+        Ok(revision) if !revision.is_empty() => {
+            println!("cargo:rustc-env=PLIEGO_GIT_SHA={revision}");
+        },
+        Ok(_) | Err(_) => println!("cargo:rustc-env=PLIEGO_GIT_SHA=nogit"),
+    }
+    match git_output(workspace_root, &["rev-parse", "--verify", "HEAD"]) {
+        Ok(revision)
+            if revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            println!(
+                "cargo:rustc-env=PLIEGO_SOURCE_COMMIT={}",
+                revision.to_ascii_lowercase()
+            );
+        },
+        Ok(_) | Err(_) => println!("cargo:rustc-env=PLIEGO_SOURCE_COMMIT=unknown"),
+    }
+
+    if let Ok(head_path) = git_output(workspace_root, &["rev-parse", "--git-path", "HEAD"]) {
+        let head_path = normalize_git_path(workspace_root, &head_path);
+        println!("cargo:rerun-if-changed={}", head_path.display());
+    }
+    if let Ok(reference) = git_output(workspace_root, &["symbolic-ref", "-q", "HEAD"]) &&
+        let Ok(reference_path) =
+            git_output(workspace_root, &["rev-parse", "--git-path", &reference])
+    {
+        let reference_path = normalize_git_path(workspace_root, &reference_path);
+        println!("cargo:rerun-if-changed={}", reference_path.display());
+    }
+    if let Ok(packed_refs_path) =
+        git_output(workspace_root, &["rev-parse", "--git-path", "packed-refs"])
+    {
+        let packed_refs_path = normalize_git_path(workspace_root, &packed_refs_path);
+        println!("cargo:rerun-if-changed={}", packed_refs_path.display());
+    }
+    Ok(())
+}
+
+fn emit_windows_gpu_exports(target_os: &str, target_env: &str, document_session_enabled: bool) {
+    // Keep the linker flags bin-scoped. The Pliego binary owns the data
+    // symbols; libraries and the nonproduction shell oracle do not.
+    for link_arg in windows_gpu_export_link_args(target_os, target_env, document_session_enabled) {
+        println!("cargo:rustc-link-arg-bin=pliego={link_arg}");
+    }
+}
 fn main() -> Result<(), Box<dyn Error>> {
-    if std::env::var("CARGO_CFG_TARGET_OS")? != "windows" {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("Pliego must live below the Servo workspace root")?;
+    emit_servo_build_identity(workspace_root)?;
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS")?;
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV")?;
+    println!(
+        "cargo:rustc-env=PLIEGO_BUILD_TARGET={}",
+        std::env::var("TARGET")?
+    );
+    emit_windows_gpu_exports(
+        &target_os,
+        &target_env,
+        std::env::var_os("CARGO_FEATURE_DOCUMENT_SESSION").is_some(),
+    );
+
+    if target_os != "windows" {
         return Ok(());
     }
 

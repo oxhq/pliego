@@ -1169,6 +1169,8 @@ def verify_api2_boundary(document: dict[str, Any], digest: str, api2: ModuleType
     scene = api2.load_json(SCENE_PATH)
     if any(contract["profiles"] for contract in runtime["contracts"]):
         raise AssertionError("API 2 runtime fixture must continue advertising no profiles")
+    if document["scene"] != {"schema": scene["schema"], "version": scene["version"]}:
+        raise AssertionError("semantic fixture must bind the current API 2 scene contract")
     if scene["semantic_layer"] is not None:
         raise AssertionError("pre-R3.5 API 2 fixture must continue making no semantic-layer claim")
 
@@ -1179,9 +1181,9 @@ def verify_api2_boundary(document: dict[str, Any], digest: str, api2: ModuleType
         "resource": digest,
         "media_type": "application/vnd.pliego.document-semantics+json",
     }
-    scene_ref_schema = api2.SCHEMAS["document-scene.v1.json"]["definitions"]["semantic_layer_ref"]
-    ref_failures = api2.validate(semantic_ref, scene_ref_schema, "document-scene.v1.json")
-    ref_failures += api2.member_order_semantics(semantic_ref, scene_ref_schema, "document-scene.v1.json")
+    scene_ref_schema = api2.SCHEMAS["document-scene.v2.json"]["definitions"]["semantic_layer_ref"]
+    ref_failures = api2.validate(semantic_ref, scene_ref_schema, "document-scene.v2.json")
+    ref_failures += api2.member_order_semantics(semantic_ref, scene_ref_schema, "document-scene.v2.json")
     if ref_failures:
         raise AssertionError("canonical semantics do not fit API 2's reserved semantic-layer slot")
 
