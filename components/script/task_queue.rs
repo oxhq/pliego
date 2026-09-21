@@ -107,7 +107,12 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
 
     /// Process incoming tasks, immediately sending priority ones downstream,
     /// and categorizing potential throttles.
-    fn process_incoming_tasks(&self, first_msg: T, fully_active: &FxHashSet<PipelineId>) {
+    fn process_incoming_tasks(
+        &self,
+        first_msg: T,
+        fully_active: &FxHashSet<PipelineId>,
+        drain_ready_port: bool,
+    ) {
         // 1. Make any previously stored task from now fully-active document available.
         let mut incoming = self.release_tasks_for_fully_active_documents(fully_active);
 
@@ -117,9 +122,11 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
         }
 
         // 3. Process any other incoming message.
-        while let Ok(msg) = self.port.try_recv() {
-            if !msg.is_wake_up() {
-                incoming.push(msg);
+        if drain_ready_port {
+            while let Ok(msg) = self.port.try_recv() {
+                if !msg.is_wake_up() {
+                    incoming.push(msg);
+                }
             }
         }
 
@@ -184,10 +191,15 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
     /// returning the port about whose readiness we want to be notified.
     pub(crate) fn select(&self) -> &crossbeam_channel::Receiver<T> {
         // This is a new iteration of the event-loop, so we reset the "business" counter.
-        self.taken_task_counter.set(0);
+        self.start_event_loop_iteration();
         // We want to be notified when the script-port is ready to receive.
         // Hence that's the one we need to include in the select.
         &self.port
+    }
+
+    /// Reset per-iteration task throttling before a controlled event-loop turn.
+    pub(crate) fn start_event_loop_iteration(&self) {
+        self.taken_task_counter.set(0);
     }
 
     /// Take a message from the front of the queue, without waiting if empty.
@@ -204,13 +216,100 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
         self.recv()
     }
 
+    /// Take at most one newly received task and then run `recv()`.
+    ///
+    /// Controlled document time uses this path so a continuously-ready producer cannot make one
+    /// driver command drain an unbounded channel batch. Ordinary event-loop intake remains
+    /// unchanged in [`Self::take_tasks_and_recv`].
+    pub(crate) fn take_one_task_and_recv(
+        &self,
+        fully_active: &FxHashSet<PipelineId>,
+    ) -> Result<T, ()> {
+        if let Ok(message) = self.recv() {
+            return Ok(message);
+        }
+        if let Ok(first_msg) = self.port.try_recv() {
+            return Ok(self.take_controlled_task_and_recv(first_msg, fully_active));
+        }
+
+        // With no producer-port input to order first, promote retained work whose document became
+        // active and release throttles eligible in this iteration.
+        self.take_one_task(T::wake_up_msg(), fully_active);
+        if let Ok(message) = self.recv() {
+            return Ok(message);
+        }
+
+        // The synthetic promotion may have generated a throttle wake-up. Consume that progress so
+        // it is represented by the controlled batch rather than reported as empty.
+        let first_msg = self.port.try_recv().map_err(|_| ())?;
+        Ok(self.take_controlled_task_and_recv(first_msg, fully_active))
+    }
+
+    /// Process one selected controlled task-port input without letting stale wake-ups overtake a
+    /// ready ordinary task.
+    pub(crate) fn take_controlled_task_and_recv(
+        &self,
+        mut first_msg: T,
+        fully_active: &FxHashSet<PipelineId>,
+    ) -> T {
+        const WAKE_SCAN_LIMIT: usize = 64;
+
+        for wake_index in 0..WAKE_SCAN_LIMIT {
+            if !first_msg.is_wake_up() {
+                // Keep eligible throttles retained until the producer port is empty. Otherwise a
+                // throttle released while handling this item could overtake the next ordinary
+                // item that is already ready on the port.
+                self.take_one_incoming_task(first_msg, fully_active);
+                return self.recv().unwrap_or_else(|_| T::wake_up_msg());
+            }
+            if wake_index + 1 == WAKE_SCAN_LIMIT {
+                // Leave any successor on the port once this command has consumed its bounded
+                // wake budget. In particular, never fetch and then drop a ready ordinary task.
+                return T::wake_up_msg();
+            }
+            let Ok(next_msg) = self.port.try_recv() else {
+                // With no ready ordinary input to order first, promote newly-active retained work
+                // and eligible throttles. A wake that produces no task remains one visible no-op.
+                self.take_one_task(T::wake_up_msg(), fully_active);
+                return self.recv().unwrap_or_else(|_| T::wake_up_msg());
+            };
+            first_msg = next_msg;
+        }
+
+        // A bounded run of stale wakes remains visible and cannot monopolize one command.
+        T::wake_up_msg()
+    }
+
     /// Drain the queue for the current iteration of the event-loop.
     /// Holding-back throttles above a given high-water mark.
     pub(crate) fn take_tasks(&self, first_msg: T, fully_active: &FxHashSet<PipelineId>) {
+        self.take_tasks_with_options(first_msg, fully_active, true, true);
+    }
+
+    /// Make one already-received task available without draining the ready producer port.
+    pub(crate) fn take_one_task(&self, first_msg: T, fully_active: &FxHashSet<PipelineId>) {
+        self.take_tasks_with_options(first_msg, fully_active, false, true);
+    }
+
+    /// Categorize one ready producer-port item while keeping eligible throttles retained.
+    fn take_one_incoming_task(&self, first_msg: T, fully_active: &FxHashSet<PipelineId>) {
+        self.take_tasks_with_options(first_msg, fully_active, false, false);
+    }
+
+    fn take_tasks_with_options(
+        &self,
+        first_msg: T,
+        fully_active: &FxHashSet<PipelineId>,
+        drain_ready_port: bool,
+        release_throttles: bool,
+    ) {
         // High-watermark: once reached, throttled tasks will be held-back.
         const PER_ITERATION_MAX: u64 = 5;
         // Always first check for new tasks, but don't reset 'taken_task_counter'.
-        self.process_incoming_tasks(first_msg, fully_active);
+        self.process_incoming_tasks(first_msg, fully_active, drain_ready_port);
+        if !release_throttles {
+            return;
+        }
         let mut throttled = self.throttled.borrow_mut();
         let mut throttled_length: usize = throttled.values().map(|queue| queue.len()).sum();
         let mut task_source_cycler = TaskSourceName::VARIANTS.iter().cycle();
@@ -261,5 +360,282 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use servo_base::id::TEST_PIPELINE_ID;
+    use style::thread_state::{self, ThreadState};
+
+    use super::*;
+
+    struct ScriptThreadStateGuard(bool);
+
+    impl ScriptThreadStateGuard {
+        fn enter() -> Self {
+            let entered = !thread_state::get().is_script();
+            if entered {
+                thread_state::enter(ThreadState::SCRIPT);
+            }
+            Self(entered)
+        }
+    }
+
+    impl Drop for ScriptThreadStateGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                thread_state::exit(ThreadState::SCRIPT);
+            }
+        }
+    }
+
+    struct NeverRunTask;
+
+    impl TaskBox for NeverRunTask {
+        fn name(&self) -> &'static str {
+            "NeverRunTask"
+        }
+
+        fn run_box(self: Box<Self>, _: &mut js::context::JSContext) {
+            panic!("task-queue tests never execute tasks")
+        }
+    }
+
+    enum TestMessage {
+        Task {
+            source: TaskSourceName,
+            pipeline_id: Option<PipelineId>,
+        },
+        Inactive,
+        WakeUp,
+    }
+
+    impl TestMessage {
+        fn task(source: TaskSourceName) -> Self {
+            Self::Task {
+                source,
+                pipeline_id: None,
+            }
+        }
+    }
+
+    impl QueuedTaskConversion for TestMessage {
+        fn task_source_name(&self) -> Option<&TaskSourceName> {
+            match self {
+                Self::Task { source, .. } => Some(source),
+                Self::Inactive | Self::WakeUp => None,
+            }
+        }
+
+        fn pipeline_id(&self) -> Option<PipelineId> {
+            match self {
+                Self::Task { pipeline_id, .. } => *pipeline_id,
+                Self::Inactive | Self::WakeUp => None,
+            }
+        }
+
+        fn into_queued_task(self) -> Option<QueuedTask> {
+            let Self::Task {
+                source,
+                pipeline_id,
+            } = self
+            else {
+                return None;
+            };
+            Some(QueuedTask {
+                worker: None,
+                event_category: source.into(),
+                task: Box::new(NeverRunTask),
+                pipeline_id,
+                task_source: source,
+            })
+        }
+
+        fn from_queued_task(queued_task: QueuedTask) -> Self {
+            Self::Task {
+                source: queued_task.task_source,
+                pipeline_id: queued_task.pipeline_id,
+            }
+        }
+
+        fn inactive_msg() -> Self {
+            Self::Inactive
+        }
+
+        fn wake_up_msg() -> Self {
+            Self::WakeUp
+        }
+
+        fn is_wake_up(&self) -> bool {
+            matches!(self, Self::WakeUp)
+        }
+    }
+
+    #[test]
+    fn controlled_poll_promotes_newly_active_retained_tasks_without_fresh_input() {
+        let _script_thread_state = ScriptThreadStateGuard::enter();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let queue = TaskQueue::new(receiver, sender.clone());
+        let mut fully_active = FxHashSet::default();
+        sender
+            .send(TestMessage::Task {
+                source: TaskSourceName::Timer,
+                pipeline_id: Some(TEST_PIPELINE_ID),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::Inactive)
+        ));
+
+        fully_active.insert(TEST_PIPELINE_ID);
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::Task {
+                source: TaskSourceName::Timer,
+                pipeline_id: Some(TEST_PIPELINE_ID)
+            })
+        ));
+    }
+
+    #[test]
+    fn controlled_poll_skips_duplicate_throttle_wakeups_without_false_empty() {
+        let _script_thread_state = ScriptThreadStateGuard::enter();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let queue = TaskQueue::new(receiver, sender.clone());
+        let fully_active = FxHashSet::default();
+        queue.start_event_loop_iteration();
+
+        for _ in 0..6 {
+            sender
+                .send(TestMessage::task(TaskSourceName::Timer))
+                .unwrap();
+            assert!(matches!(
+                queue.take_one_task_and_recv(&fully_active),
+                Ok(TestMessage::Task {
+                    source: TaskSourceName::Timer,
+                    ..
+                })
+            ));
+        }
+
+        sender
+            .send(TestMessage::task(TaskSourceName::PerformanceTimeline))
+            .unwrap();
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::WakeUp)
+        ));
+        sender
+            .send(TestMessage::task(TaskSourceName::Timer))
+            .unwrap();
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::Task {
+                source: TaskSourceName::Timer,
+                ..
+            })
+        ));
+        sender.send(TestMessage::WakeUp).unwrap();
+        sender.send(TestMessage::WakeUp).unwrap();
+
+        queue.start_event_loop_iteration();
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::Task {
+                source: TaskSourceName::PerformanceTimeline,
+                ..
+            })
+        ));
+
+        assert!(queue.take_one_task_and_recv(&fully_active).is_err());
+    }
+
+    #[test]
+    fn controlled_poll_keeps_ready_ordinary_tasks_ahead_of_released_throttles() {
+        let _script_thread_state = ScriptThreadStateGuard::enter();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let queue = TaskQueue::new(receiver, sender.clone());
+        let fully_active = FxHashSet::default();
+        queue.start_event_loop_iteration();
+
+        for _ in 0..6 {
+            sender
+                .send(TestMessage::task(TaskSourceName::Timer))
+                .unwrap();
+            assert!(matches!(
+                queue.take_one_task_and_recv(&fully_active),
+                Ok(TestMessage::Task {
+                    source: TaskSourceName::Timer,
+                    ..
+                })
+            ));
+        }
+        sender
+            .send(TestMessage::task(TaskSourceName::PerformanceTimeline))
+            .unwrap();
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::WakeUp)
+        ));
+
+        queue.start_event_loop_iteration();
+        sender.send(TestMessage::WakeUp).unwrap();
+        sender
+            .send(TestMessage::task(TaskSourceName::Timer))
+            .unwrap();
+        sender
+            .send(TestMessage::task(TaskSourceName::Timer))
+            .unwrap();
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::Task {
+                source: TaskSourceName::Timer,
+                ..
+            })
+        ));
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::Task {
+                source: TaskSourceName::Timer,
+                ..
+            })
+        ));
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::Task {
+                source: TaskSourceName::PerformanceTimeline,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn controlled_poll_does_not_drop_task_after_exact_wake_scan_limit() {
+        let _script_thread_state = ScriptThreadStateGuard::enter();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let queue = TaskQueue::new(receiver, sender.clone());
+        let fully_active = FxHashSet::default();
+
+        for _ in 0..64 {
+            sender.send(TestMessage::WakeUp).unwrap();
+        }
+        sender
+            .send(TestMessage::task(TaskSourceName::Timer))
+            .unwrap();
+
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::WakeUp)
+        ));
+        assert!(matches!(
+            queue.take_one_task_and_recv(&fully_active),
+            Ok(TestMessage::Task {
+                source: TaskSourceName::Timer,
+                ..
+            })
+        ));
     }
 }

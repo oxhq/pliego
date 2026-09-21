@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "ecafc33779bd58f41d624739dea09160",
+    "content-hash": "47cc3e6b29dc15aae157b31bf1ba9812",
     "packages": [
         {
             "name": "brick/math",
@@ -1406,16 +1406,16 @@
         },
         {
             "name": "league/commonmark",
-            "version": "2.8.3",
+            "version": "2.10.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/thephpleague/commonmark.git",
-                "reference": "1902f60f984235023acbe03db6ad614a37b3c3e7"
+                "reference": "d2d1aa8b35e072966c89bc0c66cf926e56767dc4"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/thephpleague/commonmark/zipball/1902f60f984235023acbe03db6ad614a37b3c3e7",
-                "reference": "1902f60f984235023acbe03db6ad614a37b3c3e7",
+                "url": "https://api.github.com/repos/thephpleague/commonmark/zipball/d2d1aa8b35e072966c89bc0c66cf926e56767dc4",
+                "reference": "d2d1aa8b35e072966c89bc0c66cf926e56767dc4",
                 "shasum": ""
             },
             "require": {
@@ -1452,7 +1452,7 @@
             "type": "library",
             "extra": {
                 "branch-alias": {
-                    "dev-main": "2.9-dev"
+                    "dev-main": "2.11-dev"
                 }
             },
             "autoload": {
@@ -1509,7 +1509,7 @@
                     "type": "tidelift"
                 }
             ],
-            "time": "2026-07-12T15:29:16+00:00"
+            "time": "2026-08-11T16:06:25+00:00"
         },
         {
             "name": "league/config",
@@ -2173,16 +2173,16 @@
         },
         {
             "name": "nette/schema",
-            "version": "v1.3.5",
+            "version": "v1.3.6",
             "source": {
                 "type": "git",
                 "url": "https://github.com/nette/schema.git",
-                "reference": "f0ab1a3cda782dbc5da270d28545236aa80c4002"
+                "reference": "c54350438cd6914616f790a49cb424605f421562"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/nette/schema/zipball/f0ab1a3cda782dbc5da270d28545236aa80c4002",
-                "reference": "f0ab1a3cda782dbc5da270d28545236aa80c4002",
+                "url": "https://api.github.com/repos/nette/schema/zipball/c54350438cd6914616f790a49cb424605f421562",
+                "reference": "c54350438cd6914616f790a49cb424605f421562",
                 "shasum": ""
             },
             "require": {
@@ -2234,9 +2234,9 @@
             ],
             "support": {
                 "issues": "https://github.com/nette/schema/issues",
-                "source": "https://github.com/nette/schema/tree/v1.3.5"
+                "source": "https://github.com/nette/schema/tree/v1.3.6"
             },
-            "time": "2026-02-23T03:47:12+00:00"
+            "time": "2026-08-16T21:58:41+00:00"
         },
         {
             "name": "nette/utils",
@@ -2418,11 +2418,11 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.1.0",
+            "version": "0.3.3",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "d9c09f7dacda99509ea3ebde4eef8c5d452423bc"
+                "reference": "7acc21ecacdc0c5044653233c93c1286c577bc2e"
             },
             "require": {
                 "illuminate/console": "^13.0",
@@ -2430,9 +2430,13 @@
                 "illuminate/http": "^13.0",
                 "illuminate/support": "^13.0",
                 "illuminate/view": "^13.0",
-                "oxhq/pliego-php": "0.1.0",
+                "league/flysystem": "^3.25.1",
+                "oxhq/pliego-php": "0.3.3",
                 "php": "^8.3",
                 "symfony/http-foundation": "^7.4 || ^8.0"
+            },
+            "require-dev": {
+                "laravel/pint": "^1.0"
             },
             "type": "library",
             "extra": {
@@ -2448,11 +2452,26 @@
                 }
             },
             "scripts": {
+                "release:check-runtime": [
+                    "@php tests/release_runtime_manifest_test.php"
+                ],
                 "test:runtime": [
                     "@php tests/managed_runtime_test.php"
                 ],
+                "test:quickstart": [
+                    "@php tests/quickstart_test.php"
+                ],
+                "test:timings": [
+                    "@php tests/bridge_timings_test.php"
+                ],
+                "test:storage": [
+                    "@php tests/storage_test.php"
+                ],
                 "test": [
-                    "@test:runtime"
+                    "@test:runtime",
+                    "@test:quickstart",
+                    "@test:timings",
+                    "@test:storage"
                 ]
             },
             "license": [
@@ -2466,14 +2485,15 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.1.0",
+            "version": "0.3.3",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "ee3870005b51f7ea1734ed56772f1e82e1b2b278"
+                "reference": "fe830c716da4d2cd2a820c85377a37edb6c5a577"
             },
             "require": {
-                "php": "^8.3"
+                "php": "^8.3",
+                "php-64bit": "*"
             },
             "type": "library",
             "autoload": {
@@ -2482,10 +2502,30 @@
                 }
             },
             "scripts": {
+                "test:api2": [
+                    "@php tests/api2_contract_test.php"
+                ],
+                "test:api2-render": [
+                    "@php tests/api2_render_test.php"
+                ],
+                "test:api2-scene": [
+                    "@php tests/api2_scene_validation_test.php"
+                ],
+                "test:windows-job-root": [
+                    "@php tests/windows_private_job_test.php"
+                ],
                 "test:doctor": [
                     "@php tests/doctor_test.php"
                 ],
+                "test:timings": [
+                    "@php tests/bridge_timings_test.php"
+                ],
                 "test": [
+                    "@test:api2",
+                    "@test:api2-render",
+                    "@test:api2-scene",
+                    "@test:windows-job-root",
+                    "@test:timings",
                     "@php tests/self_test.php",
                     "@php tests/timeout_test.php",
                     "@php tests/retention_test.php",
@@ -2496,7 +2536,7 @@
             "license": [
                 "MIT"
             ],
-            "description": "PHP client for one-shot Pliego document rendering",
+            "description": "PHP client for deterministic one-shot Pliego document rendering",
             "transport-options": {
                 "symlink": true,
                 "relative": true

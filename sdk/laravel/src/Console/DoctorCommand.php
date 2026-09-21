@@ -33,6 +33,9 @@ final class DoctorCommand extends Command
         $this->info("Platform: {$report['platform']}");
         $this->info("Writable work root: {$report['work_root']}");
         $this->info("Offline smoke PDF: {$report['smoke_pdf']}");
+        $this->info("Offline smoke scene: {$report['smoke_scene']}");
+        $this->info("Offline smoke bundle: {$report['smoke_bundle']}");
+        $this->info("Delivery identity: {$report['delivery_identity']}");
 
         return self::SUCCESS;
     }

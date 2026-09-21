@@ -8,8 +8,10 @@ use std::rc::Rc;
 use cssparser::{Parser, ParserInput};
 use dom_struct::dom_struct;
 use fonts::{FontContext, FontContextWebFontMethods, FontTemplate, LowercaseFontFamilyName};
+use fonts_traits::WebFontLoadFinishedAck;
 use js::context::JSContext;
 use js::rust::HandleObject;
+use log::warn;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto_and_cx};
 use style::error_reporting::ParseErrorReporter;
@@ -17,6 +19,7 @@ use style::font_face::SourceList;
 use style::properties::font_face::Descriptors;
 use style::stylesheets::{CssRuleType, FontFaceRule, UrlExtraData};
 use style_traits::{ParsingMode, ToCss};
+use timers::{DocumentProducerFence, DocumentProducerLeaseId};
 
 use crate::css::parser_context_for_document_with_reporter;
 use crate::dom::bindings::codegen::Bindings::FontFaceBinding::{
@@ -35,6 +38,32 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::NodeTraits;
 use crate::dom::promise::Promise;
 use crate::dom::window::Window;
+
+/// Completes a detached resource-layer font lease whether its Script task runs or is discarded.
+struct ScriptFontProducerCompletion {
+    fence: DocumentProducerFence,
+    lease_id: Option<DocumentProducerLeaseId>,
+}
+
+impl ScriptFontProducerCompletion {
+    fn new(fence: DocumentProducerFence, acknowledgement: WebFontLoadFinishedAck) -> Self {
+        Self {
+            fence,
+            lease_id: acknowledgement.producer_lease_id(),
+        }
+    }
+}
+
+impl Drop for ScriptFontProducerCompletion {
+    fn drop(&mut self) {
+        let Some(lease_id) = self.lease_id.take() else {
+            return;
+        };
+        if let Err(error) = self.fence.complete_lease(lease_id) {
+            warn!("Ignoring stale script-font producer lease: {error}");
+        }
+    }
+}
 
 /// <https://drafts.csswg.org/css-font-loading/#fontface-interface>
 #[dom_struct]
@@ -603,10 +632,14 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
             .task_manager()
             .font_loading_task_source()
             .to_sendable();
+        let producer_fence = global.as_window().script_thread().document_producer_fence();
 
         let finished_callback = Box::new(
-            move |family_name: LowercaseFontFamilyName, load_result: Option<_>| {
+            move |family_name: LowercaseFontFamilyName,
+                  load_result: Option<_>,
+                  acknowledgement: WebFontLoadFinishedAck| {
                 let trusted = trusted.clone();
+                let completion = ScriptFontProducerCompletion::new(producer_fence, acknowledgement);
 
                 // Step 5. When the load operation completes, successfully or not, queue a task to
                 // run the following steps synchronously:
@@ -640,6 +673,11 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
                         // `FontFace` is a member, for both failed and successful load.
                         font_face_set.handle_font_face_status_changed(cx, &font_face);
                     }
+
+                    // This explicit drop keeps the lease live through semantic completion. If the
+                    // cancellable task is discarded before running, the task closure drops the
+                    // same payload and closes the lease without leaving a false-busy fence.
+                    drop(completion);
                 }));
             },
         );
@@ -695,5 +733,42 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
     ) -> DomRoot<FontFace> {
         let global = window.as_global_scope();
         FontFace::new(cx, global, proto, family, source, descriptors)
+    }
+}
+
+#[cfg(test)]
+mod script_font_producer_completion_tests {
+    use fonts_traits::WebFontLoadFinishedAck;
+    use timers::{DocumentProducerFence, DocumentProducerKind};
+
+    use super::ScriptFontProducerCompletion;
+
+    #[test]
+    fn dropping_a_discarded_task_payload_closes_its_detached_font_lease() {
+        let fence = DocumentProducerFence::default();
+        let lease_id = fence
+            .begin(DocumentProducerKind::Font)
+            .expect("test font producer should start")
+            .into_lease_id();
+        let completion = ScriptFontProducerCompletion::new(
+            fence.clone(),
+            WebFontLoadFinishedAck::new(None, Some(lease_id)),
+        );
+        assert_eq!(
+            fence
+                .snapshot()
+                .for_kind(DocumentProducerKind::Font)
+                .pending(),
+            1
+        );
+
+        drop(completion);
+
+        let completed = fence.snapshot();
+        assert_eq!(completed.for_kind(DocumentProducerKind::Font).pending(), 0);
+        assert_eq!(
+            completed.for_kind(DocumentProducerKind::Font).completed(),
+            1
+        );
     }
 }

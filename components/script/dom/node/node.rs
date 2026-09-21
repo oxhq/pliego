@@ -1712,6 +1712,7 @@ impl Node {
 
     pub(crate) fn set_owner_doc(&self, document: &Document) {
         self.owner_doc.set(Some(document));
+        document.track_controlled_capture_node(self);
     }
 
     pub(crate) fn containing_shadow_root(&self) -> Option<DomRoot<ShadowRoot>> {
@@ -2235,7 +2236,9 @@ impl Node {
         N: DerivedFrom<Node> + DomObject + DomObjectWrap<crate::DomTypeHolder>,
     {
         let window = document.window();
-        reflect_dom_object_with_proto_and_cx(node, window, proto, cx)
+        let node = reflect_dom_object_with_proto_and_cx(node, window, proto, cx);
+        document.track_controlled_capture_node(node.upcast::<Node>());
+        node
     }
 
     pub(crate) fn new_inherited(doc: &Document) -> Node {

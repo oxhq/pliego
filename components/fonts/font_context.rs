@@ -14,6 +14,7 @@ use content_security_policy::Violation;
 use fonts_traits::{
     CSSFontFaceDescriptors, FontDescriptor, FontIdentifier, FontTemplate, FontTemplateRef,
     FontTemplateRefMethods, StylesheetWebFontLoadFinishedCallback, WebFontLoadEvent,
+    WebFontLoadFinishedAck,
 };
 use log::{debug, trace};
 use malloc_size_of::MallocSizeOf;
@@ -45,6 +46,7 @@ use style::shared_lock::{Locked, StylesheetGuards};
 use style::stylesheets::{FontFaceRule, Origin};
 use style::stylist::Stylist;
 use style::values::computed::font::{FamilyName, FontFamilyNameSyntax, SingleFontFamily};
+use timers::{DocumentProducerFence, DocumentProducerKind, DocumentProducerLeaseId};
 use url::Url;
 use uuid::Uuid;
 use webrender_api::{FontInstanceFlags, FontInstanceKey, FontKey, FontVariation};
@@ -136,6 +138,9 @@ pub struct FontContext {
 
     /// The number of fonts that are currently loading.
     number_of_loading_web_fonts: LoadingWebFontCount,
+
+    #[ignore_malloc_size_of = "The producer fence is shared by the ScriptThread"]
+    producer_fence: Option<DocumentProducerFence>,
 }
 
 /// A callback that will be invoked on the Fetch thread if a web font download
@@ -181,6 +186,31 @@ impl FontContext {
         paint_api: CrossProcessPaintApi,
         resource_threads: ResourceThreads,
     ) -> Self {
+        Self::new_inner(system_font_service_proxy, paint_api, resource_threads, None)
+    }
+
+    /// Construct a Window-owned context whose logical web-font loads participate in a document
+    /// producer fence. Worker-owned contexts intentionally use [`Self::new`] instead.
+    pub fn new_with_document_producer_fence(
+        system_font_service_proxy: Arc<SystemFontServiceProxy>,
+        paint_api: CrossProcessPaintApi,
+        resource_threads: ResourceThreads,
+        producer_fence: DocumentProducerFence,
+    ) -> Self {
+        Self::new_inner(
+            system_font_service_proxy,
+            paint_api,
+            resource_threads,
+            Some(producer_fence),
+        )
+    }
+
+    fn new_inner(
+        system_font_service_proxy: Arc<SystemFontServiceProxy>,
+        paint_api: CrossProcessPaintApi,
+        resource_threads: ResourceThreads,
+        producer_fence: Option<DocumentProducerFence>,
+    ) -> Self {
         Self {
             system_font_service_proxy,
             resource_threads: Mutex::new(resource_threads.core_thread),
@@ -195,6 +225,7 @@ impl FontContext {
             currently_downloading_fonts: Default::default(),
             known_font_face_rules: Default::default(),
             number_of_loading_web_fonts: Default::default(),
+            producer_fence,
         }
     }
 
@@ -659,31 +690,13 @@ pub(crate) struct WebFontDownloadState {
     pub(crate) font_context: Arc<FontContext>,
     initiator: WebFontLoadInitiator,
     document_context: WebFontDocumentContext,
+    producer_lease_id: Option<DocumentProducerLeaseId>,
 }
 
 impl WebFontDownloadState {
-    fn new(
-        webview_id: Option<WebViewId>,
-        font_context: Arc<FontContext>,
-        css_font_face_descriptors: CSSFontFaceDescriptors,
-        initiator: WebFontLoadInitiator,
-        sources: Vec<Source>,
-        local_fonts: HashMap<Atom, Option<FontTemplateRef>>,
-        document_context: WebFontDocumentContext,
-    ) -> WebFontDownloadState {
-        WebFontDownloadState {
-            webview_id,
-            css_font_face_descriptors,
-            remaining_sources: sources,
-            local_fonts,
-            font_context,
-            initiator,
-            document_context,
-        }
-    }
-
     pub(crate) fn handle_web_font_load_success(self, new_template: FontTemplate) {
         let family_name = self.css_font_face_descriptors.family_name.clone();
+        let producer_lease_id = self.producer_lease_id;
         match self.initiator {
             WebFontLoadInitiator::Stylesheet(initiator) => {
                 if !add_stylesheet_web_font_template_if_active(
@@ -694,11 +707,14 @@ impl WebFontDownloadState {
                     new_template,
                 ) {
                     // This font load was cancelled.
-                    if self.font_context.decrement_count_of_loading_fonts_by_one() {
+                    let event = if self.font_context.decrement_count_of_loading_fonts_by_one() {
                         // This was the last loading font - we must inform the script thread that the load
                         // has finished because this an opportunity to resolve document.fonts.ready.
-                        (initiator.callback)(WebFontLoadEvent::UnblockedFontReadyPromise);
-                    }
+                        Some(WebFontLoadEvent::UnblockedFontReadyPromise)
+                    } else {
+                        None
+                    };
+                    (initiator.callback)(WebFontLoadFinishedAck::new(event, producer_lease_id));
                     return;
                 }
 
@@ -708,11 +724,18 @@ impl WebFontDownloadState {
                 // Note: We intentionally do not call decrement_count_of_loading_fonts_by_one here.
                 // That is handled in the callback, which avoids document.fonts.ready being resolved
                 // prematurely.
-                (initiator.callback)(WebFontLoadEvent::LoadedSuccessfully);
+                (initiator.callback)(WebFontLoadFinishedAck::new(
+                    Some(WebFontLoadEvent::LoadedSuccessfully),
+                    producer_lease_id,
+                ));
             },
             WebFontLoadInitiator::Script(callback) => {
                 self.font_context.decrement_count_of_loading_fonts_by_one();
-                callback(family_name, Some(new_template));
+                callback(
+                    family_name,
+                    Some(new_template),
+                    WebFontLoadFinishedAck::new(None, producer_lease_id),
+                );
             },
         }
     }
@@ -720,17 +743,25 @@ impl WebFontDownloadState {
     /// Called when we've tried all available sources and none were usable.
     pub(crate) fn handle_web_font_load_failure(self) {
         let family_name = self.css_font_face_descriptors.family_name.clone();
+        let producer_lease_id = self.producer_lease_id;
         match self.initiator {
             WebFontLoadInitiator::Stylesheet(initiator) => {
-                if self.font_context.decrement_count_of_loading_fonts_by_one() {
+                let event = if self.font_context.decrement_count_of_loading_fonts_by_one() {
                     // This was the last loading font - we must inform the script thread that the load
                     // has finished because this an opportunity to resolve document.fonts.ready.
-                    (initiator.callback)(WebFontLoadEvent::UnblockedFontReadyPromise);
-                }
+                    Some(WebFontLoadEvent::UnblockedFontReadyPromise)
+                } else {
+                    None
+                };
+                (initiator.callback)(WebFontLoadFinishedAck::new(event, producer_lease_id));
             },
             WebFontLoadInitiator::Script(callback) => {
                 self.font_context.decrement_count_of_loading_fonts_by_one();
-                callback(family_name, None);
+                callback(
+                    family_name,
+                    None,
+                    WebFontLoadFinishedAck::new(None, producer_lease_id),
+                );
             },
         }
     }
@@ -827,11 +858,17 @@ impl FontContextWebFontMethods for Arc<FontContext> {
                 !self.is_font_face_rule_active(&stylesheet_initiator.created_by)
             {
                 // This font load was cancelled.
-                if self.decrement_count_of_loading_fonts_by_one() {
+                let event = if self.decrement_count_of_loading_fonts_by_one() {
                     // This was the last loading font - we must inform the script thread that the load
                     // has finished because this an opportunity to resolve document.fonts.ready.
-                    (stylesheet_initiator.callback)(WebFontLoadEvent::UnblockedFontReadyPromise);
-                }
+                    Some(WebFontLoadEvent::UnblockedFontReadyPromise)
+                } else {
+                    None
+                };
+                (stylesheet_initiator.callback)(WebFontLoadFinishedAck::new(
+                    event,
+                    subscriber.producer_lease_id,
+                ));
                 continue;
             }
 
@@ -981,6 +1018,12 @@ impl FontContext {
         completion_handler: WebFontLoadInitiator,
         document_context: &WebFontDocumentContext,
     ) {
+        let producer_lease_id = self.producer_fence.as_ref().map(|fence| {
+            fence
+                .begin(DocumentProducerKind::Font)
+                .expect("document font producer sequence exhausted")
+                .into_lease_id()
+        });
         self.number_of_loading_web_fonts.increment();
 
         let sources: Vec<Source> = source_list
@@ -1019,15 +1062,16 @@ impl FontContext {
             }
         }
 
-        self.process_next_web_font_source(WebFontDownloadState::new(
+        self.process_next_web_font_source(WebFontDownloadState {
             webview_id,
-            self.clone(),
+            font_context: self.clone(),
             css_font_face_descriptors,
-            completion_handler,
-            sources,
+            initiator: completion_handler,
+            remaining_sources: sources,
             local_fonts,
-            document_context.clone(),
-        ));
+            document_context: document_context.clone(),
+            producer_lease_id,
+        });
     }
 
     pub(crate) fn process_next_web_font_source(
@@ -1071,7 +1115,7 @@ impl FontContext {
 }
 
 pub(crate) type ScriptWebFontLoadFinishedCallback =
-    Box<dyn FnOnce(LowercaseFontFamilyName, Option<FontTemplate>) + Send>;
+    Box<dyn FnOnce(LowercaseFontFamilyName, Option<FontTemplate>, WebFontLoadFinishedAck) + Send>;
 
 #[derive(MallocSizeOf)]
 pub(crate) struct FontFaceRuleInitiator {

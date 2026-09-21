@@ -15,6 +15,7 @@
       "required": [
         "schema",
         "version",
+        "status",
         "generated_at",
         "host",
         "toolchain",
@@ -30,7 +31,7 @@
         "generated_at": { "type": "string" },
         "status": { "type": "string", "enum": ["supported", "failed"] },
         "host": { "$ref": "#/definitions/host" },
-        "toolchain": { "$ref": "#/definitions/toolchain" },
+        "toolchain": { "$ref": "#/definitions/publishable_toolchain" },
         "protocol": { "$ref": "#/definitions/protocol" },
         "target": { "$ref": "#/definitions/target" },
         "fixture": { "$ref": "#/definitions/fixture" },
@@ -113,12 +114,23 @@
         "engine": { "$ref": "#/definitions/engine" },
         "python_version": { "type": "string" },
         "php_version": { "type": "string" },
-        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "competitors": {
           "type": "object",
           "additionalProperties": { "type": "string" }
         }
       }
+    },
+    "publishable_toolchain": {
+      "allOf": [
+        { "$ref": "#/definitions/toolchain" },
+        {
+          "required": ["harness_revision", "competitors"],
+          "properties": {
+            "competitors": { "type": "object", "minProperties": 1 }
+          }
+        }
+      ]
     },
     "engine": {
       "type": "object",
@@ -146,20 +158,29 @@
       "additionalProperties": false,
       "required": [
         "warmup_iterations",
+        "correctness_preflight_iterations",
+        "execution_order",
         "sample_count",
         "sample_order",
         "network",
         "binary_profile",
-        "rss_method"
+        "measurement_method",
+        "percentile_method"
       ],
       "properties": {
         "warmup_iterations": { "type": "integer", "minimum": 0 },
+        "correctness_preflight_iterations": { "type": "integer", "minimum": 0 },
+        "execution_order": {
+          "type": "string",
+          "enum": ["untimed-correctness-preflight,warmup,timed"]
+        },
         "sample_count": { "type": "integer", "minimum": 1 },
         "sample_order": { "type": "string", "enum": ["random", "sequential"] },
         "seed": { "type": "integer" },
         "network": { "const": "disabled" },
         "binary_profile": { "type": "string" },
-        "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] }
+        "measurement_method": { "type": "string", "enum": ["linux-cgroup-v2-v1", "unavailable"] },
+        "percentile_method": { "const": "nearest-rank-v1" }
       }
     },
     "not_applicable_protocol": {
@@ -171,7 +192,8 @@
         "sample_order",
         "network",
         "binary_profile",
-        "rss_method"
+        "measurement_method",
+        "percentile_method"
       ],
       "properties": {
         "warmup_iterations": { "type": "integer", "minimum": 0 },
@@ -180,7 +202,8 @@
         "seed": { "type": "integer" },
         "network": { "const": "disabled" },
         "binary_profile": { "type": "string" },
-        "rss_method": { "const": "unavailable" }
+        "measurement_method": { "const": "unavailable" },
+        "percentile_method": { "const": "nearest-rank-v1" }
       }
     },
     "target": {
@@ -207,6 +230,26 @@
         "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "expected_page_count": { "type": ["integer", "null"], "minimum": 1 },
+        "expected_page_width_points": { "type": ["number", "null"], "minimum": 0 },
+        "expected_page_height_points": { "type": ["number", "null"], "minimum": 0 },
+        "dimension_tolerance_points": { "type": ["number", "null"], "minimum": 0 },
+        "expected_text_contains": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_text": { "type": ["string", "null"] },
+        "expected_font_families": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_normalized_raster_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expected_link_targets": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "expected_failure_code": { "type": ["string", "null"] }
       }
     },
@@ -218,10 +261,20 @@
         "ok",
         "exit_code",
         "wall_ms",
+        "one_shot_wall_ms",
         "user_ms",
         "sys_ms",
-        "peak_rss_kib",
-        "rss_method",
+        "memory_current_bytes",
+        "memory_peak_bytes",
+        "sampled_peak_rss_kib_lower_bound",
+        "sampled_peak_pss_kib_lower_bound",
+        "read_bytes",
+        "write_bytes",
+        "read_operations",
+        "write_operations",
+        "measurement_method",
+        "signal",
+        "resource_usage",
         "output",
         "correctness",
         "failure"
@@ -231,10 +284,25 @@
         "ok": { "type": "boolean" },
         "exit_code": { "type": "integer" },
         "wall_ms": { "type": "number", "minimum": 0 },
+        "one_shot_wall_ms": { "type": "number", "minimum": 0 },
         "user_ms": { "type": ["number", "null"], "minimum": 0 },
         "sys_ms": { "type": ["number", "null"], "minimum": 0 },
-        "peak_rss_kib": { "type": ["integer", "null"], "minimum": 0 },
-        "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] },
+        "memory_current_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "memory_peak_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "sampled_peak_rss_kib_lower_bound": { "type": ["integer", "null"], "minimum": 0 },
+        "sampled_peak_pss_kib_lower_bound": { "type": ["integer", "null"], "minimum": 0 },
+        "read_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "write_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "read_operations": { "type": ["integer", "null"], "minimum": 0 },
+        "write_operations": { "type": ["integer", "null"], "minimum": 0 },
+        "measurement_method": { "type": "string", "enum": ["linux-cgroup-v2-v1", "unavailable"] },
+        "signal": { "type": ["integer", "null"], "minimum": 1 },
+        "resource_usage": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/resource_usage" }
+          ]
+        },
         "phase_timings_ms": {
           "type": ["object", "null"],
           "additionalProperties": { "type": "number", "minimum": 0 }
@@ -331,6 +399,640 @@
         }
       }
     },
+    "resource_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "scope",
+        "delegated_parent",
+        "cgroup_path",
+        "root_pid",
+        "root_start_ticks",
+        "launch_security",
+        "wall_ms",
+        "exit_code",
+        "signal",
+        "cpu_user_ms",
+        "cpu_sys_ms",
+        "memory_current_bytes",
+        "memory_peak_bytes",
+        "read_bytes",
+        "write_bytes",
+        "read_operations",
+        "write_operations",
+        "cgroup_drained",
+        "drain_ms",
+        "accounting_settle",
+        "cleanup",
+        "counters",
+        "sampled_diagnostics",
+        "sampler_cpu_user_ms",
+        "sampler_cpu_sys_ms",
+        "sampler_cpu_percent_of_wall"
+      ],
+      "properties": {
+        "method": { "const": "linux-cgroup-v2-v1" },
+        "scope": { "const": "fresh-root-owned-cgroup-subtree" },
+        "delegated_parent": { "type": "string" },
+        "cgroup_path": { "type": "string" },
+        "root_pid": { "type": "integer", "minimum": 1 },
+        "root_start_ticks": { "type": "integer", "minimum": 1 },
+        "launch_security": { "$ref": "#/definitions/launch_security" },
+        "wall_ms": { "type": "number", "minimum": 0 },
+        "exit_code": { "type": "integer" },
+        "signal": { "type": ["integer", "null"], "minimum": 1 },
+        "cpu_user_ms": { "type": "number", "minimum": 0 },
+        "cpu_sys_ms": { "type": "number", "minimum": 0 },
+        "memory_current_bytes": { "type": "integer", "minimum": 0 },
+        "memory_peak_bytes": { "type": "integer", "minimum": 0 },
+        "read_bytes": { "type": "integer", "minimum": 0 },
+        "write_bytes": { "type": "integer", "minimum": 0 },
+        "read_operations": { "type": "integer", "minimum": 0 },
+        "write_operations": { "type": "integer", "minimum": 0 },
+        "cgroup_drained": { "const": true },
+        "drain_ms": { "type": "number", "minimum": 0 },
+        "accounting_settle": { "$ref": "#/definitions/accounting_settle" },
+        "cleanup": { "$ref": "#/definitions/cgroup_cleanup" },
+        "counters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["empty", "after_join", "final"],
+          "properties": {
+            "empty": { "$ref": "#/definitions/cgroup_counters" },
+            "after_join": { "$ref": "#/definitions/cgroup_counters" },
+            "final": { "$ref": "#/definitions/cgroup_counters" }
+          }
+        },
+        "sampled_diagnostics": { "$ref": "#/definitions/sampled_diagnostics" },
+        "sampler_cpu_user_ms": { "type": "number", "minimum": 0 },
+        "sampler_cpu_sys_ms": { "type": "number", "minimum": 0 },
+        "sampler_cpu_percent_of_wall": { "type": "number", "minimum": 0 }
+      }
+    },
+    "launch_security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "uid", "gid", "argv", "executable", "launch_context", "output_capture", "status", "migration_write_probes", "temporary_storage"],
+      "properties": {
+        "account": { "const": "pliego-benchmark-engine" },
+        "uid": { "type": "integer", "minimum": 1 },
+        "gid": { "type": "integer", "minimum": 1 },
+        "argv": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "executable": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "device", "inode"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "device": { "type": "integer", "minimum": 0 },
+            "inode": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "launch_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["browser_tmpdir", "cwd", "tmpdir"],
+          "properties": {
+            "browser_tmpdir": { "type": ["string", "null"], "minLength": 1 },
+            "cwd": { "type": "string", "minLength": 1 },
+            "tmpdir": { "type": "string", "minLength": 1 }
+          }
+        },
+        "output_capture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract", "filesystem", "max_bytes_per_stream", "write_sync", "pre", "post"],
+          "properties": {
+            "contract": { "const": "root-bound-tmpfs-engine-output-v1" },
+            "filesystem": { "const": "tmpfs" },
+            "max_bytes_per_stream": { "const": 16777216 },
+            "write_sync": { "const": "O_SYNC" },
+            "pre": { "$ref": "#/definitions/engine_output_capture_snapshot" },
+            "post": { "$ref": "#/definitions/engine_output_capture_snapshot" }
+          }
+        },
+        "status": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "uid",
+            "gid",
+            "supplementary_groups",
+            "cap_inheritable_hex",
+            "cap_permitted_hex",
+            "cap_effective_hex",
+            "cap_bounding_hex",
+            "cap_ambient_hex",
+            "no_new_privs"
+          ],
+          "properties": {
+            "uid": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "integer", "minimum": 1 } },
+            "gid": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "integer", "minimum": 1 } },
+            "supplementary_groups": { "type": "array", "maxItems": 0 },
+            "cap_inheritable_hex": { "type": "string", "pattern": "^0+$" },
+            "cap_permitted_hex": { "type": "string", "pattern": "^0+$" },
+            "cap_effective_hex": { "type": "string", "pattern": "^0+$" },
+            "cap_bounding_hex": { "type": "string", "pattern": "^0+$" },
+            "cap_ambient_hex": { "type": "string", "pattern": "^0+$" },
+            "no_new_privs": { "const": 1 }
+          }
+        },
+        "migration_write_probes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["parent", "harness", "staging", "measurement"],
+          "properties": {
+            "parent": { "$ref": "#/definitions/migration_denials" },
+            "harness": { "$ref": "#/definitions/migration_denials" },
+            "staging": { "$ref": "#/definitions/migration_denials" },
+            "measurement": { "$ref": "#/definitions/migration_denials" }
+          }
+        },
+        "temporary_storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["access_time", "account_home", "browser_shared_memory", "directory_sync", "file_sync", "filesystem", "native_api2_path_bindings", "runtime_environment", "runtime_path_bindings", "runtime_target", "scope"],
+          "properties": {
+            "access_time": { "const": "FS_NOATIME_FL" },
+            "account_home": { "$ref": "#/definitions/account_home_proof" },
+            "browser_shared_memory": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/definitions/browser_shared_memory_proof" }
+              ]
+            },
+            "directory_sync": { "const": "FS_DIRSYNC_FL" },
+            "file_sync": { "const": "FS_SYNC_FL" },
+            "filesystem": { "const": "ext4" },
+            "native_api2_path_bindings": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["pre", "post"],
+              "properties": {
+                "pre": { "$ref": "#/definitions/native_api2_storage_snapshot" },
+                "post": { "$ref": "#/definitions/native_api2_storage_snapshot" }
+              }
+            },
+            "runtime_environment": {
+              "enum": ["fixed-account-home-v1", "fresh-private-home-xdg-v1"]
+            },
+            "runtime_path_bindings": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["pre", "post"],
+              "properties": {
+                "pre": { "$ref": "#/definitions/runtime_path_snapshot" },
+                "post": { "$ref": "#/definitions/runtime_path_snapshot" }
+              }
+            },
+            "runtime_target": {
+              "enum": ["browsershot-adapter-v1", "generic-benchmark-engine-v1"]
+            },
+            "scope": { "const": "per-invocation-private" }
+          }
+        },
+        "network_isolation": {
+          "$ref": "#/definitions/network_isolation"
+        }
+      }
+    },
+    "account_home_proof": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "state"],
+          "properties": {
+            "path": { "const": "/nonexistent/pliego-benchmark-engine" },
+            "state": { "const": "absent" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "path", "state"],
+          "properties": {
+            "identity": { "$ref": "#/definitions/filesystem_identity" },
+            "path": { "const": "/nonexistent/pliego-benchmark-engine" },
+            "state": { "const": "non-writable" }
+          }
+        }
+      ]
+    },
+    "filesystem_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "inode"],
+      "properties": {
+        "device": { "type": "integer", "minimum": 0 },
+        "inode": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "engine_output_capture_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "streams"],
+      "properties": {
+        "root": { "$ref": "#/definitions/output_capture_root_binding" },
+        "streams": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stdout", "stderr"],
+          "properties": {
+            "stdout": { "$ref": "#/definitions/output_capture_stream_binding" },
+            "stderr": { "$ref": "#/definitions/output_capture_stream_binding" }
+          }
+        }
+      }
+    },
+    "browser_shared_memory_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "filesystem", "semantics", "pre", "post"],
+      "properties": {
+        "contract": { "const": "bound-private-tmpfs-browser-shared-memory-v1" },
+        "filesystem": { "const": "tmpfs" },
+        "semantics": { "const": "puppeteer-node-chrome-temporary-storage-v1" },
+        "pre": { "$ref": "#/definitions/browser_shared_memory_snapshot" },
+        "post": { "$ref": "#/definitions/browser_shared_memory_snapshot" }
+      }
+    },
+    "browser_shared_memory_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "container", "directory", "container_entries", "directory_entries"],
+      "properties": {
+        "root": { "$ref": "#/definitions/output_capture_root_binding" },
+        "container": { "$ref": "#/definitions/browser_shared_memory_directory_binding" },
+        "directory": { "$ref": "#/definitions/browser_shared_memory_directory_binding" },
+        "container_entries": {
+          "type": "array",
+          "items": { "const": "tmp" },
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "directory_entries": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "browser_shared_memory_directory_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode", "link_count"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 },
+        "link_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "output_capture_root_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "output_capture_stream_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode", "link_count", "size_bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 },
+        "link_count": { "type": "integer", "minimum": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "native_api2_storage_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindings", "contract"],
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["controlled_root", "sandbox", "job", "temporary"],
+          "properties": {
+            "controlled_root": { "$ref": "#/definitions/storage_path_binding" },
+            "sandbox": { "$ref": "#/definitions/storage_path_binding" },
+            "job": { "$ref": "#/definitions/storage_path_binding" },
+            "temporary": { "$ref": "#/definitions/storage_path_binding" }
+          }
+        },
+        "contract": { "const": "native-api2-storage-bindings-v1" }
+      }
+    },
+    "storage_path_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "path"],
+      "properties": {
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "runtime_path_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindings", "contract", "temporary_root"],
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"],
+          "properties": {
+            "HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_CACHE_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_CONFIG_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_DATA_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_RUNTIME_DIR": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_STATE_HOME": { "$ref": "#/definitions/runtime_path_binding" }
+          }
+        },
+        "contract": { "const": "runtime-path-bindings-v1" },
+        "temporary_root": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "path"],
+          "properties": {
+            "identity": { "$ref": "#/definitions/filesystem_identity" },
+            "path": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "runtime_path_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "relative_path"],
+      "properties": {
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "relative_path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "network_isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "host_namespace", "engine_namespace", "interfaces"],
+      "properties": {
+        "mode": { "const": "linux-private-network-namespace-v1" },
+        "host_namespace": { "type": "string", "pattern": "^net:\\[[0-9]+\\]$" },
+        "engine_namespace": { "type": "string", "pattern": "^net:\\[[0-9]+\\]$" },
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "const": "lo" }
+        }
+      }
+    },
+    "migration_denials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cgroup.procs", "cgroup.threads"],
+      "properties": {
+        "cgroup.procs": { "enum": ["EACCES", "EPERM"] },
+        "cgroup.threads": { "enum": ["EACCES", "EPERM"] }
+      }
+    },
+    "accounting_settle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "poll_interval_ms",
+        "timeout_ms",
+        "duration_ms",
+        "reads",
+        "stable_reads",
+        "reclaim",
+        "stable_observations"
+      ],
+      "properties": {
+        "poll_interval_ms": { "type": "number", "minimum": 0 },
+        "timeout_ms": { "type": "number", "minimum": 0 },
+        "duration_ms": { "type": "number", "minimum": 0 },
+        "reads": { "type": "integer", "minimum": 2 },
+        "stable_reads": { "const": 2 },
+        "reclaim": { "$ref": "#/definitions/accounting_reclaim" },
+        "stable_observations": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/definitions/settle_observation" }
+        }
+      }
+    },
+    "accounting_reclaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["triggered", "requested_bytes", "write_result", "before", "after"],
+      "properties": {
+        "triggered": { "type": "boolean" },
+        "requested_bytes": { "type": "integer", "minimum": 0 },
+        "write_result": { "enum": ["not-needed", "success", "under-reclaimed"] },
+        "before": { "$ref": "#/definitions/reclaim_memory_snapshot" },
+        "after": { "$ref": "#/definitions/reclaim_memory_snapshot" }
+      }
+    },
+    "reclaim_memory_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_current_bytes", "memory_file_dirty_bytes", "memory_file_writeback_bytes"],
+      "properties": {
+        "memory_current_bytes": { "type": "integer", "minimum": 0 },
+        "memory_file_dirty_bytes": { "type": "integer", "minimum": 0 },
+        "memory_file_writeback_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "settle_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_stat", "io_stat", "memory_file_dirty_bytes", "memory_file_writeback_bytes"],
+      "properties": {
+        "cpu_stat": { "$ref": "#/definitions/cpu_stat" },
+        "io_stat": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/io_stat_device" }
+        },
+        "memory_file_dirty_bytes": { "const": 0 },
+        "memory_file_writeback_bytes": { "const": 0 }
+      }
+    },
+    "cgroup_cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kill_used", "kill_grace_ms", "lingering_before_kill"],
+      "properties": {
+        "kill_used": { "type": "boolean" },
+        "kill_grace_ms": { "type": "number", "minimum": 0 },
+        "lingering_before_kill": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/process_identity" }
+        }
+      }
+    },
+    "process_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "start_ticks"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_ticks": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "cgroup_counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_stat",
+        "io_stat",
+        "memory_current_bytes",
+        "memory_peak_bytes",
+        "memory_file_dirty_bytes",
+        "memory_file_writeback_bytes",
+        "pids_peak",
+        "cgroup_events"
+      ],
+      "properties": {
+        "cpu_stat": { "$ref": "#/definitions/cpu_stat" },
+        "io_stat": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/io_stat_device" }
+        },
+        "memory_current_bytes": { "type": "integer", "minimum": 0 },
+        "memory_peak_bytes": { "type": "integer", "minimum": 0 },
+        "memory_file_dirty_bytes": { "type": "integer", "minimum": 0 },
+        "memory_file_writeback_bytes": { "type": "integer", "minimum": 0 },
+        "pids_peak": { "type": "integer", "minimum": 0 },
+        "cgroup_events": { "$ref": "#/definitions/cgroup_events" }
+      }
+    },
+    "cpu_stat": {
+      "type": "object",
+      "required": ["usage_usec", "user_usec", "system_usec"],
+      "properties": {
+        "usage_usec": { "type": "integer", "minimum": 0 },
+        "user_usec": { "type": "integer", "minimum": 0 },
+        "system_usec": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "io_stat_device": {
+      "type": "object",
+      "required": ["rbytes", "wbytes", "rios", "wios"],
+      "properties": {
+        "rbytes": { "type": "integer", "minimum": 0 },
+        "wbytes": { "type": "integer", "minimum": 0 },
+        "rios": { "type": "integer", "minimum": 0 },
+        "wios": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "cgroup_events": {
+      "type": "object",
+      "required": ["populated", "frozen"],
+      "properties": {
+        "populated": { "type": "integer", "enum": [0, 1] },
+        "frozen": { "type": "integer", "enum": [0, 1] }
+      },
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "sampled_diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage",
+        "sample_interval_ms",
+        "pss_interval_ms",
+        "page_size_bytes",
+        "max_sample_gap_ms",
+        "sampled_peak_summed_rss_kib_lower_bound",
+        "sampled_peak_summed_pss_kib_lower_bound",
+        "observed_processes",
+        "samples"
+      ],
+      "properties": {
+        "coverage": {
+          "const": "periodic post-exec cgroup membership snapshots; RSS and PSS peaks are lower bounds and may miss processes shorter than the interval"
+        },
+        "sample_interval_ms": { "type": "number", "minimum": 0 },
+        "pss_interval_ms": { "type": "number", "minimum": 0 },
+        "page_size_bytes": { "type": "integer", "minimum": 1 },
+        "max_sample_gap_ms": { "type": "number", "minimum": 0 },
+        "sampled_peak_summed_rss_kib_lower_bound": { "type": "integer", "minimum": 0 },
+        "sampled_peak_summed_pss_kib_lower_bound": { "type": ["integer", "null"], "minimum": 0 },
+        "observed_processes": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/observed_process" }
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/diagnostic_sample" }
+        }
+      }
+    },
+    "observed_process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "start_ticks", "first_seen_ms", "last_seen_ms"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_ticks": { "type": "integer", "minimum": 1 },
+        "first_seen_ms": { "type": "number", "minimum": 0 },
+        "last_seen_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "diagnostic_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "elapsed_ms",
+        "cgroup_memory_current_bytes",
+        "sampled_summed_rss_kib_lower_bound",
+        "sampled_summed_pss_kib_lower_bound",
+        "processes"
+      ],
+      "properties": {
+        "elapsed_ms": { "type": "number", "minimum": 0 },
+        "cgroup_memory_current_bytes": { "type": "integer", "minimum": 0 },
+        "sampled_summed_rss_kib_lower_bound": { "type": "integer", "minimum": 0 },
+        "sampled_summed_pss_kib_lower_bound": { "type": ["integer", "null"], "minimum": 0 },
+        "processes": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/diagnostic_sample_process" }
+        }
+      }
+    },
+    "diagnostic_sample_process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "start_ticks", "rss_pages", "pss_kib"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_ticks": { "type": "integer", "minimum": 1 },
+        "rss_pages": { "type": "integer", "minimum": 0 },
+        "pss_kib": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
     "retained": {
       "type": "object",
       "additionalProperties": false,
@@ -343,11 +1045,35 @@
     "output": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["pdf_bytes", "pdf_sha256", "page_count", "artifact_bytes", "published_pdf"],
+      "required": [
+        "pdf_bytes",
+        "pdf_sha256",
+        "page_count",
+        "artifact_bytes",
+        "published_pdf",
+        "normalized_text_sha256",
+        "font_families",
+        "normalized_raster_sha256"
+      ],
       "properties": {
         "pdf_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "pdf_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "page_count": { "type": ["integer", "null"], "minimum": 1 },
+        "page_dimensions_points": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "number", "minimum": 0 }
+          }
+        },
+        "normalized_text_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "font_families": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "normalized_raster_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "artifact_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "published_pdf": { "type": "boolean" }
       }
@@ -387,7 +1113,7 @@
     "aggregates": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["latency", "cpu", "memory", "output", "correctness", "determinism", "failures"],
+      "required": ["latency", "cpu", "memory", "io", "output", "correctness", "determinism", "failures"],
       "properties": {
         "latency": { "$ref": "#/definitions/percentiles" },
         "cpu": {
@@ -403,9 +1129,22 @@
         "memory": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["peak_rss_kib"],
+          "required": ["cgroup_peak_bytes", "sampled_peak_rss_kib_lower_bound"],
           "properties": {
-            "peak_rss_kib": { "$ref": "#/definitions/percentiles" }
+            "cgroup_peak_bytes": { "$ref": "#/definitions/percentiles" },
+            "sampled_peak_rss_kib_lower_bound": { "$ref": "#/definitions/percentiles" },
+            "sampled_peak_pss_kib_lower_bound": { "$ref": "#/definitions/percentiles" }
+          }
+        },
+        "io": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["read_bytes", "write_bytes", "read_operations", "write_operations"],
+          "properties": {
+            "read_bytes": { "$ref": "#/definitions/percentiles" },
+            "write_bytes": { "$ref": "#/definitions/percentiles" },
+            "read_operations": { "$ref": "#/definitions/percentiles" },
+            "write_operations": { "$ref": "#/definitions/percentiles" }
           }
         },
         "scaling": {
@@ -413,15 +1152,18 @@
           "additionalProperties": false,
           "properties": {
             "per_page_wall_ms": { "type": "number", "minimum": 0 },
-            "per_page_peak_rss_kib": { "type": "number", "minimum": 0 }
+            "per_page_memory_peak_bytes": { "type": "number", "minimum": 0 }
           }
         },
         "throughput": {
           "type": "object",
           "additionalProperties": false,
+          "required": ["renders_per_minute", "concurrency", "mean_one_shot_wall_ms", "measurement_boundary"],
           "properties": {
             "renders_per_minute": { "type": "number", "minimum": 0 },
-            "concurrency": { "type": "integer", "minimum": 1 }
+            "concurrency": { "type": "integer", "minimum": 1 },
+            "mean_one_shot_wall_ms": { "type": "number", "exclusiveMinimum": 0 },
+            "measurement_boundary": { "const": "runner-process-open-through-sampler-exit" }
           }
         },
         "output": {

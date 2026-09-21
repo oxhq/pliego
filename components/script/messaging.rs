@@ -23,7 +23,7 @@ use servo_base::id::{PipelineId, WebViewId};
 use servo_bluetooth_traits::BluetoothRequest;
 use servo_constellation_traits::ScriptToConstellationMessage;
 use stylo_atoms::Atom;
-use timers::TimerScheduler;
+use timers::{DocumentProducerFence, DocumentProducerGuard, DocumentProducerKind, TimerScheduler};
 #[cfg(feature = "webgpu")]
 use webgpu_traits::WebGPUMsg;
 
@@ -34,8 +34,9 @@ use crate::dom::dedicatedworkerglobalscope::DedicatedWorkerScriptMsg;
 use crate::dom::serviceworkerglobalscope::ServiceWorkerScriptMsg;
 use crate::dom::sharedworkerglobalscope::SharedWorkerScriptMsg;
 use crate::dom::worker::TrustedWorkerAddress;
+use crate::producer_fence::DocumentProducerEnvelope;
 use crate::script_runtime::ScriptThreadEventCategory;
-use crate::task::TaskBox;
+use crate::task::{ProducerFencedTaskBox, TaskBox};
 use crate::task_queue::{QueuedTask, QueuedTaskConversion, TaskQueue};
 use crate::task_source::TaskSourceName;
 
@@ -45,7 +46,7 @@ pub(crate) enum MixedMessage {
     FromConstellation(ScriptThreadMessage),
     FromScript(MainThreadScriptMsg),
     FromDevtools(DevtoolScriptControlMsg),
-    FromImageCache(ImageCacheResponseMessage),
+    FromImageCache(DocumentProducerEnvelope<ImageCacheResponseMessage>),
     #[cfg(feature = "webgpu")]
     FromWebGPUServer(WebGPUMsg),
     TimerFired,
@@ -70,6 +71,9 @@ impl MixedMessage {
                 ScriptThreadMessage::GetTitle(id) => Some(*id),
                 ScriptThreadMessage::GetDocumentOrigin(id, _) => Some(*id),
                 ScriptThreadMessage::GetLayoutDebugSnapshot(id, _) => Some(*id),
+                ScriptThreadMessage::ControlDocumentTime(_, target, _) => {
+                    target.pipelines.first().copied()
+                },
                 ScriptThreadMessage::SetDocumentActivity(id, ..) => Some(*id),
                 ScriptThreadMessage::SetThrottled(_, id, ..) => Some(*id),
                 ScriptThreadMessage::SetThrottledInContainingIframe(_, id, ..) => Some(*id),
@@ -131,7 +135,7 @@ impl MixedMessage {
                     ..,
                 ) => Some(control_id.pipeline_id),
             },
-            MixedMessage::FromImageCache(response) => match response {
+            MixedMessage::FromImageCache(response) => match &response.message {
                 ImageCacheResponseMessage::NotifyPendingImageLoadStatus(response) => {
                     Some(response.pipeline_id)
                 },
@@ -156,7 +160,7 @@ pub(crate) enum MainThreadScriptMsg {
     WorkletLoaded(PipelineId),
     NavigationResponse {
         pipeline_id: PipelineId,
-        message: Box<FetchResponseMsg>,
+        response: Box<DocumentProducerEnvelope<FetchResponseMsg>>,
     },
     /// Notifies the script thread that a new paint worklet has been registered.
     RegisterPaintWorklet {
@@ -208,7 +212,12 @@ impl fmt::Debug for CommonScriptMsg {
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 pub(crate) enum ScriptEventLoopSender {
     /// A sender that sends to the main `ScriptThread` event loop.
-    MainThread(Sender<MainThreadScriptMsg>),
+    MainThread {
+        sender: Sender<MainThreadScriptMsg>,
+        #[no_trace]
+        #[ignore_malloc_size_of = "The producer fence is shared by the ScriptThread"]
+        producer_fence: DocumentProducerFence,
+    },
     /// A sender that sends to a `SharedWorker` event loop.
     SharedWorker(Sender<SharedWorkerScriptMsg>),
     /// A sender that sends to a `ServiceWorker` event loop.
@@ -223,12 +232,44 @@ pub(crate) enum ScriptEventLoopSender {
 }
 
 impl ScriptEventLoopSender {
+    /// Begin an externally owned callback that will eventually hand work back to this event loop.
+    ///
+    /// Window callbacks participate in the document producer fence. Worker event loops remain an
+    /// explicitly unsupported controlled-time surface and therefore do not acquire a Window
+    /// producer ticket here.
+    pub(crate) fn begin_external_callback(&self) -> Option<DocumentProducerGuard> {
+        let Self::MainThread { producer_fence, .. } = self else {
+            return None;
+        };
+        Some(
+            producer_fence
+                .begin(DocumentProducerKind::ExternalCallback)
+                .expect("document external-callback producer sequence exhausted"),
+        )
+    }
+
     /// Send a message to the event loop, which might be a main thread event loop or a worker event loop.
-    pub(crate) fn send(&self, message: CommonScriptMsg) -> Result<(), SendError<()>> {
+    pub(crate) fn send(&self, mut message: CommonScriptMsg) -> Result<(), SendError<()>> {
         match self {
-            Self::MainThread(sender) => sender
-                .send(MainThreadScriptMsg::Common(message))
-                .map_err(|_| SendError(())),
+            Self::MainThread {
+                sender,
+                producer_fence,
+            } => {
+                if let CommonScriptMsg::Task(category, task, pipeline_id, task_source) = message {
+                    let guard = producer_fence
+                        .begin(DocumentProducerKind::Task)
+                        .expect("document task producer sequence exhausted");
+                    message = CommonScriptMsg::Task(
+                        category,
+                        Box::new(ProducerFencedTaskBox::new(task, guard)),
+                        pipeline_id,
+                        task_source,
+                    );
+                }
+                sender
+                    .send(MainThreadScriptMsg::Common(message))
+                    .map_err(|_| SendError(()))
+            },
             Self::SharedWorker(sender) => sender
                 .send(SharedWorkerScriptMsg::CommonWorker(
                     WorkerScriptMsg::Common(message),
@@ -367,6 +408,190 @@ impl OpaqueSender<CommonScriptMsg> for ScriptEventLoopSender {
     }
 }
 
+#[cfg(test)]
+mod producer_fence_tests {
+    use servo_base::id::TEST_PIPELINE_ID;
+
+    use super::*;
+    use crate::task_manager::TaskManager;
+
+    struct NeverRunTask;
+
+    impl TaskBox for NeverRunTask {
+        fn name(&self) -> &'static str {
+            "NeverRunTask"
+        }
+
+        fn run_box(self: Box<Self>, _: &mut js::context::JSContext) {
+            panic!("producer-fence messaging tests never execute tasks")
+        }
+    }
+
+    fn task_message() -> CommonScriptMsg {
+        CommonScriptMsg::Task(
+            ScriptThreadEventCategory::ScriptEvent,
+            Box::new(NeverRunTask),
+            None,
+            TaskSourceName::Timer,
+        )
+    }
+
+    #[test]
+    fn main_thread_sender_fences_a_task_until_the_message_is_discarded() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+
+        event_loop_sender.send(task_message()).unwrap();
+        assert_eq!(producer_fence.snapshot().pending(), 1);
+
+        drop(receiver.recv().unwrap());
+        let complete = producer_fence.snapshot();
+        assert!(complete.is_empty());
+        assert_eq!(complete.for_kind(DocumentProducerKind::Task).completed(), 1);
+    }
+
+    #[test]
+    fn failed_main_thread_send_completes_the_task_ticket() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        drop(receiver);
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+
+        assert!(event_loop_sender.send(task_message()).is_err());
+        let complete = producer_fence.snapshot();
+        assert!(complete.is_empty());
+        assert_eq!(complete.revision(), 2);
+    }
+
+    #[test]
+    fn dropped_external_callback_completes_its_ticket() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+
+        let callback = event_loop_sender.begin_external_callback().unwrap();
+        assert_eq!(
+            producer_fence
+                .snapshot()
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .pending(),
+            1
+        );
+
+        drop(callback);
+        let complete = producer_fence.snapshot();
+        assert!(complete.is_empty());
+        assert_eq!(
+            complete
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .completed(),
+            1
+        );
+    }
+
+    #[test]
+    fn external_callback_handoff_to_task_has_no_empty_fence_gap() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+
+        let callback = event_loop_sender.begin_external_callback().unwrap();
+        event_loop_sender.send(task_message()).unwrap();
+        let during_handoff = producer_fence.snapshot();
+        assert_eq!(
+            during_handoff
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .pending(),
+            1
+        );
+        assert_eq!(
+            during_handoff
+                .for_kind(DocumentProducerKind::Task)
+                .pending(),
+            1
+        );
+
+        drop(callback);
+        let after_handoff = producer_fence.snapshot();
+        assert_eq!(after_handoff.pending(), 1);
+        assert_eq!(
+            after_handoff
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .pending(),
+            0
+        );
+        assert_eq!(
+            after_handoff.for_kind(DocumentProducerKind::Task).pending(),
+            1
+        );
+
+        drop(receiver.recv().unwrap());
+        assert!(producer_fence.snapshot().is_empty());
+    }
+
+    #[test]
+    fn failed_external_callback_handoff_completes_both_tickets() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        drop(receiver);
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+
+        let callback = event_loop_sender.begin_external_callback().unwrap();
+        assert!(event_loop_sender.send(task_message()).is_err());
+        assert_eq!(producer_fence.snapshot().pending(), 1);
+
+        drop(callback);
+        let complete = producer_fence.snapshot();
+        assert!(complete.is_empty());
+        assert_eq!(
+            complete
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .completed(),
+            1
+        );
+        assert_eq!(complete.for_kind(DocumentProducerKind::Task).completed(), 1);
+    }
+
+    #[test]
+    fn cancelled_external_callback_handoff_releases_without_queuing_a_task() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+        let task_manager = TaskManager::new(Some(event_loop_sender), TEST_PIPELINE_ID, None);
+        let task_source = task_manager.timer_task_source().to_sendable();
+        let callback = task_source.begin_external_callback().unwrap();
+        task_manager.cancel_all_tasks_and_ignore_future_tasks();
+
+        task_source.queue(task!(cancelled_callback_handoff: move || {
+            panic!("a cancelled callback task must never run")
+        }));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(producer_fence.snapshot().pending(), 1);
+
+        drop(callback);
+        assert!(producer_fence.snapshot().is_empty());
+    }
+}
+
 #[derive(Clone, JSTraceable)]
 pub(crate) struct ScriptThreadSenders {
     /// A channel to hand out to script thread-based entities that need to be able to enqueue
@@ -395,7 +620,7 @@ pub(crate) struct ScriptThreadSenders {
     /// The shared [`Sender`] which is sent to the `ImageCache` when requesting an image.
     /// Messages on this channel are sent to [`ScriptThreadReceivers::image_cache_receiver`].
     #[no_trace]
-    pub(crate) image_cache_sender: Sender<ImageCacheResponseMessage>,
+    pub(crate) image_cache_sender: Sender<DocumentProducerEnvelope<ImageCacheResponseMessage>>,
 
     /// For providing contact with the time profiler.
     #[no_trace]
@@ -421,7 +646,7 @@ pub(crate) struct ScriptThreadReceivers {
 
     /// The [`Receiver`] which receives incoming messages from the `ImageCache`.
     #[no_trace]
-    pub(crate) image_cache_receiver: Receiver<ImageCacheResponseMessage>,
+    pub(crate) image_cache_receiver: Receiver<DocumentProducerEnvelope<ImageCacheResponseMessage>>,
 
     /// For receiving commands from an optional devtools server. Will be ignored if no such server
     /// exists. When devtools are not active this will be [`crossbeam_channel::never()`].
@@ -444,6 +669,26 @@ impl ScriptThreadReceivers {
         timer_scheduler: &TimerScheduler,
         fully_active: &FxHashSet<PipelineId>,
     ) -> MixedMessage {
+        self.recv_with_task_port_drain(task_queue, timer_scheduler, fully_active, true)
+    }
+
+    /// Block for one controlled input without draining an unbounded ready task port.
+    pub(crate) fn recv_controlled(
+        &self,
+        task_queue: &TaskQueue<MainThreadScriptMsg>,
+        timer_scheduler: &TimerScheduler,
+        fully_active: &FxHashSet<PipelineId>,
+    ) -> MixedMessage {
+        self.recv_with_task_port_drain(task_queue, timer_scheduler, fully_active, false)
+    }
+
+    fn recv_with_task_port_drain(
+        &self,
+        task_queue: &TaskQueue<MainThreadScriptMsg>,
+        timer_scheduler: &TimerScheduler,
+        fully_active: &FxHashSet<PipelineId>,
+        drain_ready_task_port: bool,
+    ) -> MixedMessage {
         let mut select = Select::new();
 
         let task_recv = task_queue.select();
@@ -461,11 +706,17 @@ impl ScriptThreadReceivers {
             let index = operation.index();
             if index == task_index {
                 let msg = operation.recv(task_recv).unwrap();
-                task_queue.take_tasks(msg, fully_active);
-                let event = task_queue.recv().expect(
-                    "Spurious wake-up of the event-loop, task-queue has no tasks available",
-                );
-                MixedMessage::FromScript(event)
+                if drain_ready_task_port {
+                    task_queue.take_tasks(msg, fully_active);
+                    let event = task_queue.recv().expect(
+                        "Spurious wake-up of the event-loop, task-queue has no tasks available",
+                    );
+                    MixedMessage::FromScript(event)
+                } else {
+                    MixedMessage::FromScript(
+                        task_queue.take_controlled_task_and_recv(msg, fully_active),
+                    )
+                }
             } else if index == constellation_index {
                 MixedMessage::FromConstellation(
                     operation
@@ -535,6 +786,39 @@ impl ScriptThreadReceivers {
         #[cfg(feature = "webgpu")]
         if let Ok(message) = self.webgpu_receiver.borrow().try_recv() {
             return MixedMessage::FromWebGPUServer(message.unwrap()).into();
+        }
+        None
+    }
+
+    /// Receive at most one controlled input from each selected source invocation.
+    pub(crate) fn try_recv_controlled(
+        &self,
+        task_queue: &TaskQueue<MainThreadScriptMsg>,
+        fully_active: &FxHashSet<PipelineId>,
+    ) -> Option<MixedMessage> {
+        if let Ok(message) = self.constellation_receiver.try_recv() {
+            let message = message
+                .inspect_err(|e| {
+                    log::warn!(
+                        "ScriptThreadReceivers IPC error on constellation_receiver: {:?}",
+                        e
+                    );
+                })
+                .ok()?;
+            return Some(MixedMessage::FromConstellation(message));
+        }
+        if let Ok(message) = task_queue.take_one_task_and_recv(fully_active) {
+            return Some(MixedMessage::FromScript(message));
+        }
+        if let Ok(message) = self.devtools_server_receiver.try_recv() {
+            return Some(MixedMessage::FromDevtools(message.unwrap()));
+        }
+        if let Ok(message) = self.image_cache_receiver.try_recv() {
+            return Some(MixedMessage::FromImageCache(message));
+        }
+        #[cfg(feature = "webgpu")]
+        if let Ok(message) = self.webgpu_receiver.borrow().try_recv() {
+            return Some(MixedMessage::FromWebGPUServer(message.unwrap()));
         }
         None
     }

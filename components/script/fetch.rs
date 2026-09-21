@@ -154,6 +154,7 @@ fn request_init_from_request(request: NetTraitsRequest, global: &GlobalScope) ->
     .unsafe_request(request.unsafe_request)
     .body(request.body)
     .destination(request.destination)
+    .web_resource_load_role(request.web_resource_load_role)
     .synchronous(request.synchronous)
     .mode(request.mode)
     .cache_mode(request.cache_mode)

@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use servo_canvas::retained_canvas::{
@@ -140,8 +141,9 @@ impl fmt::Display for CanvasError {
 impl std::error::Error for CanvasError {}
 
 pub fn transcript_from_retained(
-    snapshot: RetainedCanvasSnapshot,
+    snapshot: Arc<RetainedCanvasSnapshot>,
 ) -> Result<CanvasTranscript, CanvasError> {
+    let snapshot = Arc::unwrap_or_clone(snapshot);
     if let Some(unsupported) = snapshot.unsupported {
         return Err(CanvasError::UnsupportedLiveCommand {
             command: unsupported.command,

@@ -7,8 +7,9 @@ use euclid::default::Size2D;
 use js::context::JSContext;
 use pixels::Snapshot;
 use script_bindings::reflector::{AssociatedMemory, Reflector, reflect_dom_object_with_cx};
+use servo_base::generic_channel::GenericReceiver;
 use servo_base::{Epoch, generic_channel};
-use servo_canvas_traits::canvas::{CanvasCommand, CanvasId};
+use servo_canvas_traits::canvas::{CanvasCaptureObservation, CanvasCommand, CanvasId};
 use webrender_api::ImageKey;
 
 use super::canvas_state::CanvasState;
@@ -98,6 +99,19 @@ impl CanvasRenderingContext2D {
 
     pub(crate) fn send_canvas_command_immediate(&self, msg: CanvasCommand) {
         self.canvas_state.send_canvas_command_immediate(msg)
+    }
+
+    pub(crate) fn flush_capture_commands(&self) -> Result<(), ()> {
+        self.canvas_state.flush_capture_commands()
+    }
+
+    pub(crate) fn enqueue_capture_observation(
+        &self,
+        expected_image_key: Option<ImageKey>,
+        expected_size: Size2D<u32>,
+    ) -> Result<GenericReceiver<CanvasCaptureObservation>, ()> {
+        self.canvas_state
+            .enqueue_capture_observation(expected_image_key, expected_size)
     }
 
     pub(crate) fn set_image_key(&self, image_key: ImageKey) {

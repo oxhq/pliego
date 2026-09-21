@@ -14,6 +14,7 @@ use std::{mem, thread_local};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use embedder_traits::WebResourceLoadRole;
 use imsz::imsz_from_reader;
 use log::{debug, error, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf as MallocSizeOfTrait, MallocSizeOfOps};
@@ -225,7 +226,12 @@ fn set_webrender_image_key(
 // ======================================================================
 
 /// <https://html.spec.whatwg.org/multipage/#list-of-available-images>
-type ImageKey = (ServoUrl, ImmutableOrigin, Option<CorsSettings>);
+type ImageKey = (
+    ServoUrl,
+    ImmutableOrigin,
+    Option<CorsSettings>,
+    WebResourceLoadRole,
+);
 
 // Represents all the currently pending loads/decodings. For
 // performance reasons, loads are indexed by a dedicated load key.
@@ -264,6 +270,7 @@ impl AllPendingLoads {
                     pending_load.url.clone(),
                     pending_load.load_origin.clone(),
                     pending_load.cors_setting,
+                    pending_load.load_role,
                 ))
                 .unwrap();
         })
@@ -274,10 +281,11 @@ impl AllPendingLoads {
         url: ServoUrl,
         origin: ImmutableOrigin,
         cors_status: Option<CorsSettings>,
+        load_role: WebResourceLoadRole,
     ) -> CacheResult<'_> {
         match self
             .url_to_load_key
-            .entry((url.clone(), origin.clone(), cors_status))
+            .entry((url.clone(), origin.clone(), cors_status, load_role))
         {
             Occupied(url_entry) => {
                 let load_key = url_entry.get();
@@ -287,7 +295,7 @@ impl AllPendingLoads {
                 let load_key = self.keygen.next();
                 url_entry.insert(load_key);
 
-                let pending_load = PendingLoad::new(url, origin, cors_status);
+                let pending_load = PendingLoad::new(url, origin, cors_status, load_role);
                 match self.loads.entry(load_key) {
                     Occupied(_) => unreachable!(),
                     Vacant(load_entry) => {
@@ -748,6 +756,8 @@ struct PendingLoad {
     /// The CORS attribute setting for the requesting
     cors_setting: Option<CorsSettings>,
 
+    load_role: WebResourceLoadRole,
+
     /// The CORS status of this image response.
     cors_status: CorsStatus,
 
@@ -763,6 +773,7 @@ impl PendingLoad {
         url: ServoUrl,
         load_origin: ImmutableOrigin,
         cors_setting: Option<CorsSettings>,
+        load_role: WebResourceLoadRole,
     ) -> PendingLoad {
         PendingLoad {
             bytes: ImageBytes::InProgress(vec![]),
@@ -773,6 +784,7 @@ impl PendingLoad {
             load_origin,
             final_url: None,
             cors_setting,
+            load_role,
             cors_status: CorsStatus::Unsafe,
             content_type: None,
         }
@@ -1079,6 +1091,7 @@ impl ImageCacheStore {
                 pending_load.url,
                 pending_load.load_origin,
                 pending_load.cors_setting,
+                pending_load.load_role,
             ),
             completed_load,
         );
@@ -1094,10 +1107,12 @@ impl ImageCacheStore {
         origin: &ImmutableOrigin,
         cors_setting: &Option<CorsSettings>,
     ) {
-        if let Some(loaded_image) =
-            self.completed_loads
-                .remove(&(url.clone(), origin.clone(), *cors_setting)) &&
-            let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response &&
+        if let Some(loaded_image) = self.completed_loads.remove(&(
+            url.clone(),
+            origin.clone(),
+            *cors_setting,
+            WebResourceLoadRole::DocumentContent,
+        )) && let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response &&
             let Some(id) = image.id
         {
             self.paint_api.update_images(
@@ -1146,9 +1161,10 @@ impl ImageCacheStore {
         url: ServoUrl,
         origin: ImmutableOrigin,
         cors_setting: Option<CorsSettings>,
+        load_role: WebResourceLoadRole,
     ) -> Option<Result<(Image, ServoUrl), ()>> {
         self.completed_loads
-            .get(&(url, origin, cors_setting))
+            .get(&(url, origin, cors_setting, load_role))
             .map(|completed_load| match &completed_load.image_response {
                 ImageResponse::Loaded(image, url) => Ok((image.clone(), url.clone())),
                 ImageResponse::FailedToLoadOrDecode | ImageResponse::MetadataLoaded(_) => Err(()),
@@ -1298,23 +1314,32 @@ impl ImageCache for ImageCacheImpl {
         cors_setting: Option<CorsSettings>,
     ) -> Option<Image> {
         let store = self.store.lock();
-        let result = store.get_completed_image_if_available(url, origin, cors_setting);
+        let result = store.get_completed_image_if_available(
+            url,
+            origin,
+            cors_setting,
+            WebResourceLoadRole::DocumentContent,
+        );
         match result {
             Some(Ok((img, _))) => Some(img),
             _ => None,
         }
     }
 
-    fn get_cached_image_status(
+    fn get_cached_image_status_for_role(
         &self,
         url: ServoUrl,
         origin: ImmutableOrigin,
         cors_setting: Option<CorsSettings>,
+        load_role: WebResourceLoadRole,
     ) -> ImageCacheResult {
         let mut store = self.store.lock();
-        if let Some(result) =
-            store.get_completed_image_if_available(url.clone(), origin.clone(), cors_setting)
-        {
+        if let Some(result) = store.get_completed_image_if_available(
+            url.clone(),
+            origin.clone(),
+            cors_setting,
+            load_role,
+        ) {
             match result {
                 Ok((image, image_url)) => {
                     debug!("{} is available", url);
@@ -1332,7 +1357,7 @@ impl ImageCache for ImageCacheImpl {
 
         let result = store
             .pending_loads
-            .get_cached(url.clone(), origin, cors_setting);
+            .get_cached(url.clone(), origin, cors_setting, load_role);
         match result {
             CacheResult::Hit(key, pl) => match (&pl.result, &pl.metadata) {
                 (&Some(Ok(_)), _) => ImageCacheResult::Pending(key),

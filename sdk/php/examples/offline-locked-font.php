@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+// Deprecated API 1 compatibility example. New integrations should use DocumentEngine as shown in README.md.
+
 use Pliego\Php\CliRenderer;
 use Pliego\Php\Exception\RenderException;
 use Pliego\Php\RenderOptions;
